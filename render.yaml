@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: sunflower-land
+    runtime: static
+    buildCommand: yarn install --frozen-lockfile && npx vite build
+    staticPublishPath: ./dist
+    envVars:
+      - key: DISABLE_REACT_COMPILER
+        value: "1"
+      - key: NODE_OPTIONS
+        value: --max-old-space-size=4096
+      - key: VITE_NETWORK
+        value: amoy
+      - key: VITE_PRIVATE_IMAGE_URL
+        value: https://sunflower-land.com/testnet-assets
+      - key: VITE_ANIMATION_URL
+        value: https://animations-dev.sunflower-land.com
+      - key: VITE_CLIENT_VERSION
+        value: local-dev
+      - key: VITE_RELEASE_VERSION
+        value: local-dev
+      - key: VITE_SEQUENCE_ACCESS_KEY
+        value: local-dev
