@@ -24,8 +24,12 @@ export default defineConfig(({ command }) => {
       react({
         babel: {
           // The React Compiler is slow on this codebase; keep it for builds
-          // only so local dev starts/loads faster.
-          plugins: isDev ? [] : ["babel-plugin-react-compiler"],
+          // only so local dev starts/loads faster. DISABLE_REACT_COMPILER=1
+          // skips it entirely (e.g. on small CI machines that run out of memory).
+          plugins:
+            isDev || process.env.DISABLE_REACT_COMPILER === "1"
+              ? []
+              : ["babel-plugin-react-compiler"],
         },
       }),
       preload(),
