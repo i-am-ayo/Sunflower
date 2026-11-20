@@ -1,0 +1,254 @@
+import React, { useContext, useEffect, useRef, useState } from "react";
+
+import { GOLD_RECOVERY_TIME } from "features/game/lib/constants";
+import { Context } from "features/game/GameProvider";
+
+import type { InventoryItemName, Rock, Skills } from "features/game/types/game";
+import { useSelector } from "@xstate/react";
+import type { MachineState } from "features/game/lib/gameMachine";
+import Decimal from "decimal.js-light";
+import { DepletedGold } from "./components/DepletedGold";
+import { DepletingGold } from "./components/DepletingGold";
+import { RecoveredGold } from "./components/RecoveredGold";
+import { useSound } from "lib/utils/hooks/useSound";
+import type { GoldRockName } from "features/game/types/resources";
+import { Transition } from "@headlessui/react";
+import lightning from "assets/icons/lightning.png";
+import {
+  getMineBoostWindows,
+  type BoostWindow,
+} from "features/game/lib/boostWindows";
+import { useNodeTimer } from "features/game/lib/useNodeTimer";
+
+const HITS = 3;
+const tool = "Iron Pickaxe";
+
+// Field comparator for the mine boost windows so the selector skips re-renders
+// without allocating JSON strings per rock on every service update.
+const areBoostWindowsEqual = (a: BoostWindow[], b: BoostWindow[]) =>
+  a.length === b.length &&
+  a.every((window, index) => {
+    const other = b[index];
+    return (
+      other !== undefined &&
+      window.from === other.from &&
+      window.to === other.to &&
+      window.speed === other.speed
+    );
+  });
+
+const HasTool = (
+  inventory: Partial<Record<InventoryItemName, Decimal>>,
+  goldRock: Rock,
+) => {
+  const requiredToolAmount = goldRock.multiplier ?? 1;
+  if (requiredToolAmount <= 0) return true;
+  return (inventory[tool] ?? new Decimal(0)).gte(requiredToolAmount);
+};
+
+const selectInventory = (state: MachineState) => state.context.state.inventory;
+
+const compareResource = (prev: Rock, next: Rock) => {
+  return JSON.stringify(prev) === JSON.stringify(next);
+};
+
+const selectSkills = (state: MachineState) =>
+  state.context.state.bumpkin?.skills;
+
+const compareSkills = (prev: Skills, next: Skills) =>
+  (prev["Tap Prospector"] ?? false) === (next["Tap Prospector"] ?? false);
+
+const _selectSeason = (state: MachineState) =>
+  state.context.state.season.season;
+const _selectIsland = (state: MachineState) => state.context.state.island;
+
+interface Props {
+  id: string;
+}
+
+export const Gold: React.FC<Props> = ({ id }) => {
+  const { gameService, shortcutItem, showAnimations } = useContext(Context);
+
+  const [touchCount, setTouchCount] = useState(0);
+
+  // When to hide the resource that pops out
+  const [collecting, setCollecting] = useState(false);
+
+  const harvested = useRef<number>(0);
+
+  const divRef = useRef<HTMLDivElement>(null);
+
+  const { play: miningFallAudio } = useSound("mining_fall");
+
+  // Reset the touch count when clicking outside of the component
+  useEffect(() => {
+    const handleClickOutside = (event: any) => {
+      if (divRef.current && !divRef.current.contains(event.target)) {
+        setTouchCount(0);
+      }
+    };
+    document.addEventListener("click", handleClickOutside, true);
+    return () => {
+      document.removeEventListener("click", handleClickOutside, true);
+    };
+  }, []);
+
+  const resource = useSelector(
+    gameService,
+    (state) => state.context.state.gold[id],
+    compareResource,
+  );
+  const inventory = useSelector(
+    gameService,
+    selectInventory,
+    (prev, next) =>
+      HasTool(prev, resource) === HasTool(next, resource) &&
+      (prev.Logger ?? new Decimal(0)).equals(next.Logger ?? new Decimal(0)),
+  );
+  const skills = useSelector(gameService, selectSkills, compareSkills);
+  const season = useSelector(gameService, _selectSeason);
+  const island = useSelector(gameService, _selectIsland);
+  const goldRockName = (resource.name ?? "Gold Rock") as GoldRockName;
+  // Live windowed mine-recovery speed boosts (Ore Hourglass, Mole Shrine,
+  // totems). Recomputed from full state but only re-renders when the windows
+  // actually change, so the countdown reacts to boosters placed/expired mid-recover.
+  const mineBoostWindows = useSelector(
+    gameService,
+    (state) => getMineBoostWindows(state.context.state, goldRockName),
+    areBoostWindowsEqual,
+  );
+
+  const hasTool = HasTool(inventory, resource);
+
+  const { minedAt, baseDurationMs } = resource.stone;
+  const {
+    now,
+    readyAt,
+    countdownSeconds: timeLeft,
+  } = useNodeTimer({
+    startedAt: minedAt,
+    baseDurationMs: baseDurationMs ?? GOLD_RECOVERY_TIME * 1000,
+    windows: mineBoostWindows,
+  });
+  // Read readiness off the timer's live readyAt (same live mine windows as the
+  // countdown), so the rock unlocks the moment the countdown hits zero.
+  const mined = now <= readyAt;
+
+  const [isAnimationRunning, setIsAnimationRunning] = useState(false);
+  const [isRecentlyMined, setIsRecentlyMined] = useState(false);
+  const minedAtRef = useRef(resource.stone.minedAt);
+
+  useEffect(() => {
+    if (minedAtRef.current !== resource.stone.minedAt) {
+      // Important: update the ref so this change is only handled once.
+      minedAtRef.current = resource.stone.minedAt;
+      setIsRecentlyMined(true);
+
+      const timeout = setTimeout(() => {
+        setIsRecentlyMined(false);
+        setIsAnimationRunning(true);
+      }, 1900);
+
+      return () => clearTimeout(timeout);
+    }
+  }, [resource.stone.minedAt]);
+
+  useEffect(() => {
+    if (isAnimationRunning) {
+      const timeout = setTimeout(() => {
+        setIsAnimationRunning(false);
+      }, 500);
+      return () => clearTimeout(timeout);
+    }
+  }, [isAnimationRunning]);
+
+  const strike = () => {
+    if (!hasTool) return;
+
+    shortcutItem(tool);
+
+    if (skills["Tap Prospector"]) {
+      // insta-mine the mineral
+      return mine();
+    }
+
+    setTouchCount((count) => count + 1);
+    // need to hit enough times to collect resource
+    if (touchCount < HITS - 1) return;
+
+    // can collect resources otherwise
+    mine();
+    setTouchCount(0);
+  };
+
+  const mine = async () => {
+    // Read the popup amount off the reducer's result, so it shows exactly what
+    // was added (same timestamp, boosts and rolls as the mined event).
+    const before =
+      gameService.getSnapshot().context.state.inventory.Gold ?? new Decimal(0);
+    gameService.send("goldRock.mined", {
+      index: id,
+    });
+    const goldMined = (
+      gameService.getSnapshot().context.state.inventory.Gold ?? new Decimal(0)
+    ).minus(before);
+
+    if (showAnimations) {
+      setCollecting(true);
+      harvested.current = goldMined.toNumber();
+    }
+
+    miningFallAudio();
+
+    if (showAnimations) {
+      await new Promise((res) => setTimeout(res, 3000));
+      setCollecting(false);
+      harvested.current = 0;
+    }
+  };
+
+  return (
+    <div className="relative w-full h-full">
+      <Transition
+        show={!mined && isAnimationRunning}
+        enter="transition-opacity transition-transform duration-200"
+        enterFrom="opacity-0 translate-y-4"
+        enterTo="opacity-100 -translate-y-0"
+        leave="transition-opacity duration-100"
+        leaveFrom="opacity-100"
+        leaveTo="opacity-0"
+        className="flex -top-2 right-0 absolute z-40 pointer-events-none"
+        as="div"
+      >
+        <img src={lightning} className="h-6 img-highlight-heavy" />
+      </Transition>
+      {/* Resource ready to collect */}
+      {!mined && !isRecentlyMined && (
+        <div ref={divRef} className="absolute w-full h-full" onClick={strike}>
+          <RecoveredGold
+            season={season}
+            island={island}
+            hasTool={hasTool}
+            touchCount={touchCount}
+            goldRockName={goldRockName}
+            requiredToolAmount={new Decimal(resource.multiplier ?? 1)}
+            inventory={inventory}
+          />
+        </div>
+      )}
+
+      {/* Depleting resource animation */}
+      {collecting && <DepletingGold resourceAmount={harvested.current} />}
+
+      {/* Depleted resource */}
+      {(mined || isRecentlyMined) && (
+        <DepletedGold
+          season={season}
+          island={island}
+          timeLeft={timeLeft}
+          name={goldRockName}
+        />
+      )}
+    </div>
+  );
+};

@@ -1,0 +1,50 @@
+import { refreshBeehivesOnRateChange } from "features/game/lib/updateBeehives";
+import { assertEquipment } from "./equip";
+import type { Equipped } from "features/game/types/bumpkin";
+import type { GameState } from "features/game/types/game";
+import { populateSaltFarm } from "features/game/types/salt";
+import { produce } from "immer";
+
+export type EquipFarmHandAction = {
+  type: "farmHand.equipped";
+  id: string;
+  equipment: Equipped;
+};
+
+type Options = {
+  state: Readonly<GameState>;
+  action: EquipFarmHandAction;
+  createdAt?: number;
+};
+
+export function equipFarmhand({
+  state,
+  action,
+  createdAt = Date.now(),
+}: Options): GameState {
+  const gameAfter = produce(state, (game) => {
+    const bumpkin = game.farmHands.bumpkins[action.id];
+
+    if (bumpkin === undefined) {
+      throw new Error("Farm hand does not exist");
+    }
+
+    assertEquipment({
+      equipment: action.equipment,
+      bumpkin,
+      game,
+    });
+
+    bumpkin.equipped = action.equipment;
+
+    populateSaltFarm({ gameBefore: state, gameAfter: game, now: createdAt });
+
+    return game;
+  });
+
+  return refreshBeehivesOnRateChange({
+    gameBefore: state,
+    gameAfter,
+    createdAt,
+  });
+}

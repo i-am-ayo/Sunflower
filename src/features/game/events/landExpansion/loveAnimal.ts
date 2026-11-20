@@ -1,0 +1,311 @@
+import Decimal from "decimal.js-light";
+import { getSkillLevel, SKILL_RANKS } from "features/game/types/bumpkinSkills";
+import {
+  getAnimalReadyAt,
+  getClaimedExperience,
+  getNextClaimLevel,
+  getPendingClaims,
+  makeAnimalBuildingKey,
+} from "features/game/lib/animals";
+import { isCollectibleBuilt } from "features/game/lib/collectibleBuilt";
+import {
+  type AnimalLevel,
+  ANIMALS,
+  type AnimalType,
+} from "features/game/types/animals";
+import type {
+  Animal,
+  GameState,
+  LoveAnimalItem,
+} from "features/game/types/game";
+import { produce } from "immer";
+
+/**
+ * Earliest timestamp at which this animal's current sleep cycle would
+ * permit `loveAnimal`. Mirrors the two throw-gates below: both
+ * `asleepAt + period` and `lovedAt + period` must have elapsed, where
+ * `period = (readyAt - asleepAt) / 3`. Callers should still check
+ * `t < readyAt` — once the animal is awake the cycle is over
+ * and no further love applies. The returned value can therefore be
+ * `>= readyAt` when no slot remains in this cycle (e.g. both slots
+ * already used); the caller decides how to render that.
+ *
+ * `readyAt` is the animal's live wake time (`getAnimalReadyAt`), which under the
+ * speed-rate model moves as a shrine is placed or expires. The cadence is thus
+ * thirds of the PROJECTED sleep, not thirds of the remaining work: a shrine
+ * running out mid-sleep pushes a nearly-open love slot back out. Deliberate —
+ * the alternative (work-based thirds) drifts away from the wall-clock rhythm
+ * players actually schedule around. Required rather than defaulted so every
+ * caller has to decide where its wake time comes from.
+ */
+export function getNextLoveAvailableAt(
+  animal: Animal,
+  readyAt: number,
+): number {
+  const third = (readyAt - animal.asleepAt) / 3;
+  const next = Math.max(animal.asleepAt + third, animal.lovedAt + third);
+
+  // Both slots spent: nothing opens before waking, even if the wake time has
+  // since moved later (a later wake stretches the third past the last love).
+  return getLovesThisSleep(animal) >= MAX_LOVES_PER_SLEEP
+    ? Math.max(next, readyAt)
+    : next;
+}
+
+const MAX_LOVES_PER_SLEEP = 2;
+
+/**
+ * Loves spent in the current sleep. A love at or before `asleepAt` belongs to an
+ * earlier sleep — no love lands on the start of one, the first slot opens a third
+ * in, but a cycle-completing love can be claimed in the same millisecond.
+ * `lovedAt` and `asleepAt` shift together on a building lift, so the comparison
+ * holds across one. An animal loved this sleep before the count existed has had
+ * at least one.
+ */
+export function getLovesThisSleep(animal: Animal): number {
+  if (animal.lovedAt <= animal.asleepAt) return 0;
+
+  return animal.lovesThisSleep ?? 1;
+}
+
+/**
+ * Boolean form of {@link getNextLoveAvailableAt}: has the love window opened by `now`?
+ * `<=` (not `<`) so love is accepted at exactly the boundary timestamp — matches
+ * the original `loveAnimal` reducer's `if (createdAt < boundary) throw` semantics
+ * (rejects strictly before, accepts at equality).
+ */
+export function isAnimalNeedingLove(
+  animal: Animal,
+  now: number,
+  readyAt: number,
+): boolean {
+  return getNextLoveAvailableAt(animal, readyAt) <= now;
+}
+
+/**
+ * UI/action affordance form: the love window has opened and the animal is
+ * still asleep. Once the animal wakes, feeding becomes the next required action.
+ */
+export function isAnimalReadyForLove(
+  animal: Animal,
+  now: number,
+  readyAt: number,
+): boolean {
+  return now < readyAt && isAnimalNeedingLove(animal, now, readyAt);
+}
+
+export type LoveAnimalAction = {
+  type: "animal.loved";
+  animal: AnimalType;
+  id: string;
+  item: LoveAnimalItem;
+};
+
+type Options = {
+  state: Readonly<GameState>;
+  action: LoveAnimalAction;
+  createdAt?: number;
+};
+
+export function loveAnimal({
+  state,
+  action,
+  createdAt = Date.now(),
+}: Options): GameState {
+  return produce(state, (copy) => {
+    const { buildingRequired } = ANIMALS[action.animal];
+    const buildingKey = makeAnimalBuildingKey(buildingRequired);
+    const animal = copy[buildingKey].animals[action.id];
+
+    const readyAt = getAnimalReadyAt(animal, copy);
+
+    if (createdAt > readyAt) {
+      throw new Error("The animal is not sleeping");
+    }
+
+    // You can love an animal twice in a night — see getNextLoveAvailableAt.
+    if (
+      getLovesThisSleep(animal) >= MAX_LOVES_PER_SLEEP ||
+      !isAnimalNeedingLove(animal, createdAt, readyAt)
+    ) {
+      throw new Error("The animal cannot be loved yet");
+    }
+
+    if (animal.item !== action.item) {
+      throw new Error(`${action.item} is the wrong item`);
+    }
+
+    if ((copy.inventory[action.item] ?? new Decimal(0)).lt(1)) {
+      throw new Error(`Missing item, ${action.item}`);
+    }
+
+    const { animalXP } = getAnimalXP({
+      name: action.item,
+      state: copy,
+      animal: action.animal,
+    });
+
+    // Pin the claimed mark first, so a level the pet crosses is banked.
+    animal.claimedExperience = getClaimedExperience(animal);
+    animal.experience += animalXP;
+    animal.lovesThisSleep = getLovesThisSleep(animal) + 1;
+    animal.lovedAt = createdAt;
+
+    animal.item = getAnimalItem(getNextClaimLevel(animal), Math.random);
+
+    // Same as feeding: a level-up, or at max level a completed XP cycle, means
+    // the animal wakes with produce rather than a wrapped-around bar. A sick
+    // animal stays sick: only a cure makes it ready again.
+    if (animal.state !== "sick" && getPendingClaims(animal) > 0) {
+      animal.state = "ready";
+    }
+
+    return copy;
+  });
+}
+
+const ANIMAL_ITEM_CHANCES: Record<
+  AnimalLevel,
+  Record<LoveAnimalItem, number>
+> = {
+  0: {
+    "Petting Hand": 0,
+    Brush: 0,
+    "Music Box": 0,
+  },
+  1: {
+    "Petting Hand": 10,
+    Brush: 0,
+    "Music Box": 0,
+  },
+  2: {
+    "Petting Hand": 8,
+    Brush: 2,
+    "Music Box": 0,
+  },
+  3: {
+    "Petting Hand": 7,
+    Brush: 3,
+    "Music Box": 0,
+  },
+  4: {
+    "Petting Hand": 6,
+    Brush: 3,
+    "Music Box": 1,
+  },
+  5: {
+    "Petting Hand": 5,
+    Brush: 4,
+    "Music Box": 1,
+  },
+  6: {
+    "Petting Hand": 5,
+    Brush: 3,
+    "Music Box": 2,
+  },
+  7: {
+    "Petting Hand": 4,
+    Brush: 4,
+    "Music Box": 2,
+  },
+  8: {
+    "Petting Hand": 4,
+    Brush: 3,
+    "Music Box": 3,
+  },
+  9: {
+    "Petting Hand": 3,
+    Brush: 4,
+    "Music Box": 3,
+  },
+  10: {
+    "Petting Hand": 3,
+    Brush: 3,
+    "Music Box": 4,
+  },
+  11: {
+    "Petting Hand": 2,
+    Brush: 4,
+    "Music Box": 4,
+  },
+  12: {
+    "Petting Hand": 2,
+    Brush: 3,
+    "Music Box": 5,
+  },
+  13: {
+    "Petting Hand": 1,
+    Brush: 4,
+    "Music Box": 5,
+  },
+  14: {
+    "Petting Hand": 1,
+    Brush: 3,
+    "Music Box": 6,
+  },
+  15: {
+    "Petting Hand": 1,
+    Brush: 2,
+    "Music Box": 7,
+  },
+};
+
+export const ITEM_XP: Record<LoveAnimalItem, number> = {
+  "Petting Hand": 25,
+  Brush: 40,
+  "Music Box": 50,
+};
+
+export function getAnimalXP({
+  name,
+  state,
+  animal,
+}: {
+  name: LoveAnimalItem;
+  state: GameState;
+  animal: AnimalType;
+}) {
+  let animalXP = ITEM_XP[name];
+  let multiplier = 1;
+
+  const heartwarmingInstrumentsLevel = getSkillLevel(
+    state.bumpkin.skills,
+    "Heartwarming Instruments",
+  );
+  if (heartwarmingInstrumentsLevel) {
+    multiplier +=
+      SKILL_RANKS["Heartwarming Instruments"].ranks[
+        heartwarmingInstrumentsLevel - 1
+      ];
+  }
+
+  // Multipliers first, then flat bonuses, so Heartwarming Instruments does
+  // not scale the Baby Cow / Spa Sheep bonus.
+  animalXP *= multiplier;
+
+  if (
+    animal === "Cow" &&
+    isCollectibleBuilt({ name: "Baby Cow", game: state })
+  ) {
+    animalXP += 10;
+  }
+
+  if (
+    animal === "Sheep" &&
+    isCollectibleBuilt({ name: "Spa Sheep", game: state })
+  ) {
+    animalXP += 5;
+  }
+
+  return { animalXP };
+}
+
+function getAnimalItem(level: AnimalLevel, randomGenerator: () => number) {
+  // Pick weighted item from array - https://gist.github.com/oepn/33bc587bc09ce9895c43
+  const weighted = Object.entries(ANIMAL_ITEM_CHANCES[level])
+    .map(([item, weighting]) => new Array(weighting).fill(item))
+    .reduce((acc, current) => [...acc, ...current], [] as LoveAnimalItem[]);
+
+  const random = weighted[Math.floor(randomGenerator() * weighted.length)];
+  return random;
+}

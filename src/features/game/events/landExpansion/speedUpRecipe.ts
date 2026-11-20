@@ -1,0 +1,178 @@
+import Decimal from "decimal.js-light";
+import type {
+  BuildingName,
+  CookingBuildingName,
+} from "features/game/types/buildings";
+import { trackFarmActivity } from "features/game/types/farmActivity";
+import type { GameState } from "features/game/types/game";
+import { produce } from "immer";
+import { getCurrentCookingItem, recalculateQueue } from "./cancelQueuedRecipe";
+import {
+  assertCookableName,
+  type CookableName,
+} from "features/game/types/consumables";
+import { getCookingAmount } from "./collectRecipe";
+import {
+  chargeCoinsForSpeedUp,
+  getInstantGems,
+  makeGemHistory,
+  type SpeedUpPaymentMethod,
+} from "features/game/lib/getInstantGems";
+import { updateBoostUsed } from "features/game/types/updateBoostUsed";
+import { getCookingBoostWindows } from "features/game/lib/boostWindows";
+import {
+  burnRecipeOil,
+  settleCookingOil,
+} from "features/game/lib/cookingReadiness";
+import { isCookingBuilding } from "./isCookingBuilding";
+
+export type InstantCookRecipe = {
+  type: "recipe.spedUp";
+  buildingId: string;
+  buildingName: BuildingName;
+  paymentMethod?: SpeedUpPaymentMethod;
+};
+
+type Options = {
+  state: Readonly<GameState>;
+  action: InstantCookRecipe;
+  createdAt?: number;
+  farmId: number;
+};
+
+// To delete after cookoff
+export const COOK_OFF_FOODS: CookableName[] = [
+  "Fried Tofu",
+  "Rice Bun",
+  "Grape Juice",
+  "Banana Blast",
+  "Orange Cake",
+  "Honey Cake",
+  "Fermented Fish",
+  "Fancy Fries",
+  "Pancakes",
+  "Tofu Scramble",
+];
+
+export function speedUpRecipe({
+  state,
+  action,
+  createdAt = Date.now(),
+  farmId,
+}: Options): GameState {
+  return produce(state, (game) => {
+    const building = game.buildings[action.buildingName]?.find(
+      (b) => b.id === action.buildingId,
+    );
+
+    if (!building) {
+      throw new Error("Building does not exist");
+    }
+
+    // A lifted building is paused until it is placed again (see `placeBuilding`).
+    if (!building.coordinates) {
+      throw new Error("Building is not placed");
+    }
+
+    // Settle the oil at the speed-up; the sped-up recipe then pays for the oil it
+    // would have burned cooking out (see `burnRecipeOil`), and the recipe promoted
+    // behind it draws from what is left.
+    const settled = isCookingBuilding(action.buildingName)
+      ? settleCookingOil({
+          game,
+          building,
+          buildingName: action.buildingName,
+          at: createdAt,
+        })
+      : undefined;
+    const queue = building.crafting;
+    const cooking = getCurrentCookingItem({
+      building,
+      createdAt,
+      game,
+      oil: settled,
+    });
+
+    if (!queue || !cooking) {
+      throw new Error("Nothing is cooking");
+    }
+
+    const { index: recipeIndex, recipe, readyAt } = cooking;
+
+    const oil =
+      settled && isCookingBuilding(action.buildingName)
+        ? burnRecipeOil({
+            building,
+            buildingName: action.buildingName,
+            index: recipeIndex,
+            at: createdAt,
+            windows: getCookingBoostWindows(game),
+          })
+        : undefined;
+
+    // Price off the DERIVED ready time: the player is charged for the wait they can
+    // actually see, so an active boost makes skipping cheaper.
+    const gems = getInstantGems({
+      readyAt,
+      now: createdAt,
+      game,
+    });
+
+    if (action.paymentMethod === "coins") {
+      game = chargeCoinsForSpeedUp({ game, gems, createdAt });
+    } else {
+      if (!game.inventory["Gem"]?.gte(gems)) {
+        throw new Error("Insufficient gems");
+      }
+
+      game.inventory["Gem"] = (game.inventory["Gem"] ?? new Decimal(0)).sub(
+        gems,
+      );
+
+      game = makeGemHistory({ game, amount: gems, createdAt });
+    }
+    const cookableName = assertCookableName(recipe.name);
+
+    const { amount, boostsUsed } = getCookingAmount({
+      building: action.buildingName,
+      game,
+      recipe,
+      farmId,
+      counter: game.farmActivity[`${cookableName} Cooked`] || 0,
+    });
+    game.inventory[cookableName] = (
+      game.inventory[cookableName] ?? new Decimal(0)
+    ).add(amount);
+
+    // Drop the sped-up recipe by POSITION. Matching on `id` or `readyAt` removes
+    // every entry that shares one, so a player who queued the same recipe twice
+    // would lose both while paying for one.
+    const queueWithoutSpedUpRecipe = queue.filter(
+      (_, index) => index !== recipeIndex,
+    );
+
+    building.crafting = recalculateQueue({
+      queue: queueWithoutSpedUpRecipe,
+      createdAt,
+      buildingName: action.buildingName as CookingBuildingName,
+      isInstantCook: true,
+      game,
+      oil,
+    });
+
+    game.farmActivity = trackFarmActivity(
+      `${cookableName} Cooked`,
+      game.farmActivity,
+    );
+
+    if (boostsUsed.length > 0) {
+      game.boostsUsedAt = updateBoostUsed({
+        game,
+        boostNames: boostsUsed,
+        createdAt,
+      });
+    }
+
+    return game;
+  });
+}

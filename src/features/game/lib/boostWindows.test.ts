@@ -1,0 +1,2256 @@
+import {
+  computeReadyAt,
+  getBoostWindows,
+  getEffectiveSpeedAt,
+  workAccruedAt,
+  CROP_PLOT_BOOST_SPEED,
+  TREE_BOOST_SPEED,
+  MINE_BOOST_SPEED,
+  FRUIT_BOOST_SPEED,
+  FLOWER_BOOST_SPEED,
+  GREENHOUSE_BOOST_SPEED,
+  getTreeBoostWindows,
+  getMineBoostWindows,
+  getFruitBoostWindows,
+  getTurbofruitMixWindows,
+  getCropFertiliserWindows,
+  getFlowerBoostWindows,
+  getGreenhouseBoostWindows,
+  getGreenhouseGlowWindows,
+  getOilBoostWindows,
+  OIL_BOOST_SPEED,
+  appendBoostHistory,
+  getCookingBoostWindows,
+  getCropPlotBoostWindows,
+  getPowerHourWindows,
+  getSunshowerGuardianWindows,
+  getSunshowerWindows,
+  getAnimalBoostWindows,
+  ANIMAL_BOOST_SPEED,
+  type BoostWindow,
+} from "./boostWindows";
+import { GUARDIAN_BOOST } from "./getActiveGuardian";
+import {
+  getCookingOil,
+  getCookingOilAt,
+  getCookingQueueReadyAts,
+} from "./cookingReadiness";
+import { populateSeason } from "./season";
+import { getObjectEntries } from "lib/object";
+import { EXPIRY_COOLDOWNS } from "./collectibleBuilt";
+import { TEST_FARM } from "./constants";
+import type {
+  BuildingProduct,
+  CropFertiliser,
+  GameState,
+  GreenhouseFertiliser,
+} from "../types/game";
+import type { RockName } from "../types/resources";
+
+const HOUR = 60 * 60 * 1000;
+
+describe("computeReadyAt", () => {
+  it("returns startedAt + baseDuration when there are no windows", () => {
+    const startedAt = 1_000_000;
+    expect(
+      computeReadyAt({ startedAt, baseDurationMs: 4 * HOUR, windows: [] }),
+    ).toEqual(startedAt + 4 * HOUR);
+  });
+
+  it("runs at full speed while a window covers the whole task", () => {
+    const startedAt = 0;
+    const windows: BoostWindow[] = [{ from: 0, to: 10 * HOUR, speed: 2 }];
+    // 4h of work at 2x finishes in 2h.
+    expect(
+      computeReadyAt({ startedAt, baseDurationMs: 4 * HOUR, windows }),
+    ).toEqual(2 * HOUR);
+  });
+
+  it("only credits the overlap when the window is shorter than the task", () => {
+    const startedAt = 0;
+    // Window active for the first hour at 2x → 2h of work done in 1h.
+    const windows: BoostWindow[] = [{ from: 0, to: 1 * HOUR, speed: 2 }];
+    // Remaining 2h of work at 1x → finishes at 1h + 2h = 3h.
+    expect(
+      computeReadyAt({ startedAt, baseDurationMs: 4 * HOUR, windows }),
+    ).toEqual(3 * HOUR);
+  });
+
+  it("applies a window placed AFTER the task started (retroactive)", () => {
+    const startedAt = 0;
+    // No boost for the first 2h, then a 2x window opens.
+    const windows: BoostWindow[] = [
+      { from: 2 * HOUR, to: 10 * HOUR, speed: 2 },
+    ];
+    // 2h of work done in the first 2h, remaining 2h of work at 2x → +1h = 3h.
+    expect(
+      computeReadyAt({ startedAt, baseDurationMs: 4 * HOUR, windows }),
+    ).toEqual(3 * HOUR);
+  });
+
+  it("reverts to 1x after a window expires mid-task", () => {
+    const startedAt = 0;
+    const windows: BoostWindow[] = [{ from: 0, to: 1 * HOUR, speed: 2 }];
+    // 6h of work: 2h done in the first hour, remaining 4h at 1x → 1h + 4h = 5h.
+    expect(
+      computeReadyAt({ startedAt, baseDurationMs: 6 * HOUR, windows }),
+    ).toEqual(5 * HOUR);
+  });
+
+  it("multiplies speeds where two windows overlap", () => {
+    const startedAt = 0;
+    const windows: BoostWindow[] = [
+      { from: 0, to: 10 * HOUR, speed: 2 },
+      { from: 0, to: 1 * HOUR, speed: 2 },
+    ];
+    // First hour at 4× → 4h of work → finishes in 1h exactly.
+    expect(
+      computeReadyAt({ startedAt, baseDurationMs: 4 * HOUR, windows }),
+    ).toEqual(1 * HOUR);
+  });
+
+  it("stacks two equal boosts multiplicatively (1.35× × 1.35× = 1.8225×)", () => {
+    const startedAt = 0;
+    const windows: BoostWindow[] = [
+      { from: 0, to: 10 * HOUR, speed: 1.35 },
+      { from: 0, to: 10 * HOUR, speed: 1.35 },
+    ];
+    // Both cover the whole task → 1.35 × 1.35 = 1.8225× → base / 1.8225.
+    expect(
+      computeReadyAt({ startedAt, baseDurationMs: 4 * HOUR, windows }),
+    ).toBeCloseTo((4 * HOUR) / (1.35 * 1.35), 5);
+  });
+
+  it("ignores the portion of a window before the task started", () => {
+    const startedAt = 5 * HOUR;
+    const windows: BoostWindow[] = [{ from: 0, to: 6 * HOUR, speed: 2 }];
+    // Only [5h, 6h] overlaps: 1h at 2x = 2h work, remaining 2h at 1x.
+    // → 6h + 2h = 8h.
+    expect(
+      computeReadyAt({ startedAt, baseDurationMs: 4 * HOUR, windows }),
+    ).toEqual(8 * HOUR);
+  });
+});
+
+describe("workAccruedAt", () => {
+  it("returns 0 before the task started", () => {
+    expect(workAccruedAt({ startedAt: 100, at: 50, windows: [] })).toEqual(0);
+  });
+
+  it("is the dual of computeReadyAt", () => {
+    const startedAt = 0;
+    const baseDurationMs = 4 * HOUR;
+    const windows: BoostWindow[] = [{ from: 0, to: 1 * HOUR, speed: 2 }];
+    const readyAt = computeReadyAt({ startedAt, baseDurationMs, windows });
+    expect(workAccruedAt({ startedAt, at: readyAt, windows })).toBeCloseTo(
+      baseDurationMs,
+      5,
+    );
+  });
+
+  it("accrues at the window speed while active", () => {
+    const windows: BoostWindow[] = [{ from: 0, to: 1 * HOUR, speed: 2 }];
+    // Half an hour into a 2x window → 1h of work accrued.
+    expect(workAccruedAt({ startedAt: 0, at: 0.5 * HOUR, windows })).toEqual(
+      1 * HOUR,
+    );
+  });
+});
+
+describe("getEffectiveSpeedAt", () => {
+  it("returns 1 when no window covers the instant", () => {
+    const windows: BoostWindow[] = [{ from: 0, to: 1 * HOUR, speed: 2 }];
+    expect(getEffectiveSpeedAt({ at: 2 * HOUR, windows })).toEqual(1);
+  });
+
+  it("returns the window speed while it is active", () => {
+    const windows: BoostWindow[] = [{ from: 0, to: 1 * HOUR, speed: 2 }];
+    expect(getEffectiveSpeedAt({ at: 0.5 * HOUR, windows })).toEqual(2);
+  });
+
+  it("treats the window as half-open [from, to)", () => {
+    const windows: BoostWindow[] = [{ from: 0, to: 1 * HOUR, speed: 2 }];
+    expect(getEffectiveSpeedAt({ at: 0, windows })).toEqual(2);
+    expect(getEffectiveSpeedAt({ at: 1 * HOUR, windows })).toEqual(1);
+  });
+
+  it("multiplies overlapping window speeds", () => {
+    const windows: BoostWindow[] = [
+      { from: 0, to: 2 * HOUR, speed: 2 },
+      { from: 1 * HOUR, to: 3 * HOUR, speed: 1.5 },
+    ];
+    expect(getEffectiveSpeedAt({ at: 1.5 * HOUR, windows })).toEqual(3);
+  });
+});
+
+describe("getBoostWindows", () => {
+  it("builds a window from createdAt + cooldown for an active Sparrow Shrine", () => {
+    const createdAt = 1_000_000;
+    const windows = getBoostWindows({
+      game: {
+        ...TEST_FARM,
+        collectibles: {
+          ...TEST_FARM.collectibles,
+          "Sparrow Shrine": [
+            { id: "1", coordinates: { x: 0, y: 0 }, createdAt },
+          ],
+        },
+      },
+      name: "Sparrow Shrine",
+      speed: CROP_PLOT_BOOST_SPEED["Sparrow Shrine"],
+    });
+
+    expect(windows).toEqual([
+      {
+        from: createdAt,
+        to: createdAt + EXPIRY_COOLDOWNS["Sparrow Shrine"],
+        speed: CROP_PLOT_BOOST_SPEED["Sparrow Shrine"],
+      },
+    ]);
+  });
+
+  it("anchors the window on createdAt even when readyAt is later", () => {
+    // Matches isTemporaryCollectibleActive, which keys off createdAt + cooldown;
+    // temporary collectibles are placed active (no build delay), so readyAt does
+    // not gate the boost window.
+    const createdAt = 1_000_000;
+    const windows = getBoostWindows({
+      game: {
+        ...TEST_FARM,
+        collectibles: {
+          ...TEST_FARM.collectibles,
+          "Sparrow Shrine": [
+            {
+              id: "1",
+              coordinates: { x: 0, y: 0 },
+              createdAt,
+              readyAt: createdAt + 60 * 60 * 1000,
+            },
+          ],
+        },
+      },
+      name: "Sparrow Shrine",
+      speed: CROP_PLOT_BOOST_SPEED["Sparrow Shrine"],
+    });
+
+    expect(windows).toEqual([
+      {
+        from: createdAt,
+        to: createdAt + EXPIRY_COOLDOWNS["Sparrow Shrine"],
+        speed: CROP_PLOT_BOOST_SPEED["Sparrow Shrine"],
+      },
+    ]);
+  });
+
+  it("truncates the window at removedAt when the shrine was picked up", () => {
+    const createdAt = 1_000_000;
+    const removedAt = createdAt + 2 * HOUR;
+    const windows = getBoostWindows({
+      game: {
+        ...TEST_FARM,
+        collectibles: {
+          ...TEST_FARM.collectibles,
+          "Sparrow Shrine": [{ id: "1", createdAt, removedAt }],
+        },
+      },
+      name: "Sparrow Shrine",
+      speed: CROP_PLOT_BOOST_SPEED["Sparrow Shrine"],
+    });
+
+    expect(windows).toEqual([
+      {
+        from: createdAt,
+        to: removedAt,
+        speed: CROP_PLOT_BOOST_SPEED["Sparrow Shrine"],
+      },
+    ]);
+  });
+
+  it("returns no windows when none are placed", () => {
+    expect(
+      getBoostWindows({
+        game: TEST_FARM,
+        name: "Sparrow Shrine",
+        speed: CROP_PLOT_BOOST_SPEED["Sparrow Shrine"],
+      }),
+    ).toEqual([]);
+  });
+
+  it("merges overlapping placements into one window (no double-multiply)", () => {
+    const createdAt = 1_000_000;
+    const cooldown = EXPIRY_COOLDOWNS["Sparrow Shrine"];
+    // Second shrine placed 1h later — its window overlaps the first's.
+    const secondCreatedAt = createdAt + 60 * 60 * 1000;
+    const windows = getBoostWindows({
+      game: {
+        ...TEST_FARM,
+        collectibles: {
+          ...TEST_FARM.collectibles,
+          "Sparrow Shrine": [
+            { id: "1", coordinates: { x: 0, y: 0 }, createdAt },
+            {
+              id: "2",
+              coordinates: { x: 1, y: 1 },
+              createdAt: secondCreatedAt,
+            },
+          ],
+        },
+      },
+      name: "Sparrow Shrine",
+      speed: CROP_PLOT_BOOST_SPEED["Sparrow Shrine"],
+    });
+
+    // Coalesced into a single window at the single speed (not stacked/4x).
+    expect(windows).toEqual([
+      {
+        from: createdAt,
+        to: secondCreatedAt + cooldown,
+        speed: CROP_PLOT_BOOST_SPEED["Sparrow Shrine"],
+      },
+    ]);
+  });
+
+  it("includes finalized intervals from boostHistory (even with no live placement)", () => {
+    // The shrine is gone (burned), but its window survives in boostHistory.
+    const windows = getBoostWindows({
+      game: {
+        ...TEST_FARM,
+        collectibles: {},
+        boostHistory: { "Sparrow Shrine": [{ from: 1000, to: 5000 }] },
+      },
+      name: "Sparrow Shrine",
+      speed: CROP_PLOT_BOOST_SPEED["Sparrow Shrine"],
+    });
+
+    expect(windows).toEqual([
+      { from: 1000, to: 5000, speed: CROP_PLOT_BOOST_SPEED["Sparrow Shrine"] },
+    ]);
+  });
+
+  it("unions a live placement with a disjoint history interval", () => {
+    const cooldown = EXPIRY_COOLDOWNS["Sparrow Shrine"];
+    const liveCreatedAt = 1_000_000;
+    const windows = getBoostWindows({
+      game: {
+        ...TEST_FARM,
+        collectibles: {
+          ...TEST_FARM.collectibles,
+          "Sparrow Shrine": [
+            { id: "1", coordinates: { x: 0, y: 0 }, createdAt: liveCreatedAt },
+          ],
+        },
+        boostHistory: { "Sparrow Shrine": [{ from: 0, to: 5000 }] },
+      },
+      name: "Sparrow Shrine",
+      speed: CROP_PLOT_BOOST_SPEED["Sparrow Shrine"],
+    });
+
+    expect(windows).toEqual([
+      { from: 0, to: 5000, speed: CROP_PLOT_BOOST_SPEED["Sparrow Shrine"] },
+      {
+        from: liveCreatedAt,
+        to: liveCreatedAt + cooldown,
+        speed: CROP_PLOT_BOOST_SPEED["Sparrow Shrine"],
+      },
+    ]);
+  });
+});
+
+describe("appendBoostHistory", () => {
+  const DAY = 24 * HOUR;
+
+  it("records a finalized window for a windowed boost collectible", () => {
+    const game = { ...TEST_FARM, boostHistory: {} } as GameState;
+    appendBoostHistory(game, "Sparrow Shrine", { from: 1000, to: 2000 }, 2000);
+    expect(game.boostHistory?.["Sparrow Shrine"]).toEqual([
+      { from: 1000, to: 2000 },
+    ]);
+  });
+
+  it("appends to existing history for the same boost", () => {
+    const game = {
+      ...TEST_FARM,
+      boostHistory: { "Harvest Hourglass": [{ from: 1000, to: 2000 }] },
+    } as GameState;
+    appendBoostHistory(
+      game,
+      "Harvest Hourglass",
+      { from: 3000, to: 4000 },
+      4000,
+    );
+    expect(game.boostHistory?.["Harvest Hourglass"]).toEqual([
+      { from: 1000, to: 2000 },
+      { from: 3000, to: 4000 },
+    ]);
+  });
+
+  it("prunes intervals that ended long before now", () => {
+    const now = 100 * DAY;
+    const game = {
+      ...TEST_FARM,
+      boostHistory: { "Sparrow Shrine": [{ from: 0, to: 1000 }] }, // ancient
+    } as GameState;
+    appendBoostHistory(
+      game,
+      "Sparrow Shrine",
+      { from: now - 500, to: now },
+      now,
+    );
+    expect(game.boostHistory?.["Sparrow Shrine"]).toEqual([
+      { from: now - 500, to: now },
+    ]);
+  });
+
+  it("keeps a window a windowed crop machine's ledger still needs", () => {
+    // A windowed machine banks work forward from `oilSettledAt`, so every
+    // window ending after that anchor is still load-bearing. The anchor only
+    // advances when the machine is settled, while pruning runs on any event, so
+    // an untouched machine can leave it older than the prune horizon — and
+    // pruning then silently un-does completed growth.
+    const now = 100 * DAY;
+    const anchor = now - 30 * DAY;
+    const game = {
+      ...TEST_FARM,
+      buildings: {
+        "Crop Machine": [
+          {
+            coordinates: { x: 0, y: 0 },
+            createdAt: 0,
+            id: "1",
+            readyAt: 0,
+            oilSettledAt: anchor,
+            unallocatedOilTime: 0,
+            // A pack still in flight (stalled on an empty tank) reads the
+            // windows from the anchor on.
+            queue: [
+              {
+                crop: "Sunflower",
+                seeds: 10,
+                growTimeRemaining: 0,
+                totalGrowTime: 4 * HOUR,
+                baseDurationMs: 4 * HOUR,
+              },
+            ],
+          },
+        ],
+      },
+      boostHistory: {
+        "Tortoise Shrine": [{ from: anchor, to: anchor + HOUR }],
+      },
+    } as unknown as GameState;
+
+    appendBoostHistory(
+      game,
+      "Tortoise Shrine",
+      { from: now - 500, to: now },
+      now,
+    );
+
+    expect(game.boostHistory?.["Tortoise Shrine"]).toEqual([
+      { from: anchor, to: anchor + HOUR },
+      { from: now - 500, to: now },
+    ]);
+  });
+
+  it.each([
+    ["an empty queue", []],
+    [
+      "only finished packs",
+      [
+        {
+          crop: "Sunflower",
+          seeds: 10,
+          growTimeRemaining: 0,
+          totalGrowTime: 4 * HOUR,
+          readyAt: 1000,
+        },
+      ],
+    ],
+  ])(
+    "does not hold history back for an idle crop machine (%s)",
+    (_label, queue) => {
+      // Only a pack still carrying `baseDurationMs` re-derives work from the
+      // windows; an idle machine's anchor must not pin history forever.
+      const now = 100 * DAY;
+      const anchor = now - 30 * DAY;
+      const game = {
+        ...TEST_FARM,
+        buildings: {
+          "Crop Machine": [
+            {
+              coordinates: { x: 0, y: 0 },
+              createdAt: 0,
+              id: "1",
+              readyAt: 0,
+              oilSettledAt: anchor,
+              unallocatedOilTime: 0,
+              queue,
+            },
+          ],
+        },
+        boostHistory: {
+          "Tortoise Shrine": [{ from: anchor, to: anchor + HOUR }],
+        },
+      } as unknown as GameState;
+
+      appendBoostHistory(
+        game,
+        "Tortoise Shrine",
+        { from: now - 500, to: now },
+        now,
+      );
+
+      expect(game.boostHistory?.["Tortoise Shrine"]).toEqual([
+        { from: now - 500, to: now },
+      ]);
+    },
+  );
+
+  it("still prunes a window that predates even the oldest ledger anchor", () => {
+    const now = 100 * DAY;
+    const anchor = now - 30 * DAY;
+    const game = {
+      ...TEST_FARM,
+      buildings: {
+        "Crop Machine": [
+          {
+            coordinates: { x: 0, y: 0 },
+            createdAt: 0,
+            id: "1",
+            readyAt: 0,
+            oilSettledAt: anchor,
+            unallocatedOilTime: 0,
+            queue: [],
+          },
+        ],
+      },
+      boostHistory: { "Tortoise Shrine": [{ from: 0, to: 1000 }] },
+    } as unknown as GameState;
+
+    appendBoostHistory(
+      game,
+      "Tortoise Shrine",
+      { from: now - 500, to: now },
+      now,
+    );
+
+    expect(game.boostHistory?.["Tortoise Shrine"]).toEqual([
+      { from: now - 500, to: now },
+    ]);
+  });
+
+  describe("cooking queues", () => {
+    // A cooking queue is a chain: every chained recipe re-derives its start from
+    // the head's `startedAt` through the boost windows, so a window in the head's
+    // first hours still decides when the LAST recipe is ready. Four VIP slots of
+    // the 48h Creamy Truffle Risotto keep a chain alive for 8 days - longer than
+    // the 7-day prune horizon.
+    const T0 = 100 * DAY;
+    const RISOTTO = 48 * HOUR;
+    const HOURGLASS = { from: T0, to: T0 + 6 * HOUR };
+    // The window appended to trigger the prune: an hourglass that expired before
+    // the chain began, burned only now, so it doesn't move the chain itself.
+    const BURNED = { from: T0 - 10 * HOUR, to: T0 - 4 * HOUR };
+
+    const risottos = (): BuildingProduct[] => [
+      {
+        name: "Creamy Truffle Risotto",
+        readyAt: 0,
+        startedAt: T0,
+        baseDurationMs: RISOTTO,
+      },
+      ...[1, 2, 3].map(() => ({
+        name: "Creamy Truffle Risotto" as const,
+        readyAt: 0,
+        baseDurationMs: RISOTTO,
+      })),
+    ];
+
+    const farm = ({
+      crafting = risottos(),
+      lifted,
+    }: {
+      crafting?: BuildingProduct[];
+      lifted?: { removedAt: number };
+    } = {}) =>
+      ({
+        ...TEST_FARM,
+        buildings: {
+          ...TEST_FARM.buildings,
+          Kitchen: [
+            {
+              id: "1",
+              createdAt: 0,
+              readyAt: 0,
+              ...(lifted
+                ? { removedAt: lifted.removedAt }
+                : { coordinates: { x: 0, y: 0 } }),
+              crafting,
+            },
+          ],
+        },
+        boostHistory: { "Gourmet Hourglass": [HOURGLASS] },
+      }) as unknown as GameState;
+
+    const tailReadyAt = (game: GameState) =>
+      getCookingQueueReadyAts({
+        crafting: game.buildings.Kitchen?.[0].crafting ?? [],
+        game,
+      })[3];
+
+    it("keeps a window an uncollected chain still re-derives from", () => {
+      // The 6h hourglass cooks 12h of the head's work in 6h, saving 6h on the
+      // whole chain: tail = T0 + 4 x 48h - 6h = T0 + 186h.
+      const game = farm();
+      expect(tailReadyAt(game)).toEqual(T0 + 186 * HOUR);
+
+      // At T0 + 187h the tail is ready and the hourglass window ended more than
+      // 7 days ago. Another Gourmet Hourglass being burned must not prune it -
+      // that would push the tail back to T0 + 192h and un-ready a finished dish.
+      const now = T0 + 187 * HOUR;
+      appendBoostHistory(game, "Gourmet Hourglass", BURNED, now);
+
+      expect(game.boostHistory?.["Gourmet Hourglass"]).toEqual([
+        HOURGLASS,
+        BURNED,
+      ]);
+      expect(tailReadyAt(game)).toEqual(T0 + 186 * HOUR);
+    });
+
+    it("keeps a window a lifted building still banks from on placement", () => {
+      // A lifted Kitchen with no oil ledger banks the work done before the lift
+      // only when it is placed again, re-deriving it through the windows - so it
+      // can need them for as long as it stays in the inventory.
+      const now = T0 + 60 * DAY;
+      const game = farm({ lifted: { removedAt: T0 + 100 * HOUR } });
+
+      appendBoostHistory(game, "Gourmet Hourglass", BURNED, now);
+
+      expect(game.boostHistory?.["Gourmet Hourglass"]).toEqual([
+        HOURGLASS,
+        BURNED,
+      ]);
+    });
+
+    it("only holds back the history of boosts that speed up cooking", () => {
+      // The same lifted Kitchen pins its cooking windows for as long as it sits
+      // in the inventory, but an Ore Hourglass can't change a recipe, so its
+      // history still prunes on the usual 7-day horizon.
+      const now = T0 + 60 * DAY;
+      const game = farm({ lifted: { removedAt: T0 + 100 * HOUR } });
+      game.boostHistory = {
+        ...game.boostHistory,
+        "Ore Hourglass": [HOURGLASS],
+      };
+
+      appendBoostHistory(game, "Ore Hourglass", BURNED, now);
+
+      expect(game.boostHistory?.["Ore Hourglass"]).toEqual([BURNED]);
+    });
+
+    it("keeps a window an earlier recipe still needs when a later one is anchored", () => {
+      // The hourglass makes the head ready at T0 + 42h (unboosted T0 + 48h). A
+      // 1h recipe cooked on the then-idle Kitchen is anchored at T0 + 43h, and the
+      // Kitchen is lifted at T0 + 44h. The LAST recipe's unboosted end is the
+      // lift, but the head's is 4h after it: on placement it banks the work done
+      // by the lift through the windows, and without the hourglass it would come
+      // back with 4h left to cook.
+      const now = T0 + 60 * DAY;
+      const game = farm({
+        crafting: [
+          {
+            name: "Creamy Truffle Risotto",
+            readyAt: 0,
+            startedAt: T0,
+            baseDurationMs: RISOTTO,
+          },
+          {
+            name: "Creamy Truffle Risotto",
+            readyAt: 0,
+            startedAt: T0 + 43 * HOUR,
+            baseDurationMs: HOUR,
+          },
+        ],
+        lifted: { removedAt: T0 + 44 * HOUR },
+      });
+
+      appendBoostHistory(game, "Gourmet Hourglass", BURNED, now);
+
+      expect(game.boostHistory?.["Gourmet Hourglass"]).toEqual([
+        HOURGLASS,
+        BURNED,
+      ]);
+    });
+
+    it("keeps a window an unsettled clock-burn recipe still burns oil by", () => {
+      // A recipe queued before the work burn (`oilBoost` but no `oilRate`) burns
+      // its oil per REAL day until it is ready, so its window decides how much
+      // oil it burned even once it is done - until a settle pins that down.
+      const recipe: BuildingProduct = {
+        name: "Creamy Truffle Risotto",
+        readyAt: 0,
+        startedAt: T0,
+        baseDurationMs: RISOTTO,
+        oilBoost: 0.25,
+      };
+      const game = farm({ crafting: [recipe] });
+      const kitchen = game.buildings.Kitchen?.[0];
+      if (!kitchen) throw new Error("No Kitchen");
+      kitchen.oil = 20;
+      kitchen.oilSettledAt = T0;
+
+      const oilAt = (at: number) =>
+        getCookingOilAt({
+          crafting: [recipe],
+          windows: getCookingBoostWindows(game),
+          oil: getCookingOil({ building: kitchen, buildingName: "Kitchen" })!,
+          at,
+        });
+
+      // Oil speeds it up 1 / (1 - 0.25) = 4/3x. The 6h hourglass at 2x does
+      // 6 x 2 x 4/3 = 16h of work; the other 32h take 32 / (4/3) = 24h, so it is
+      // ready at T0 + 30h (T0 + 36h unboosted) - well before now, unboosted or
+      // not. It burned 30h x 6.75/day = 8.4375 oil, leaving 11.5625.
+      const now = T0 + 8 * DAY;
+      expect(oilAt(now)).toBeCloseTo(11.5625);
+
+      appendBoostHistory(game, "Gourmet Hourglass", BURNED, now);
+
+      expect(game.boostHistory?.["Gourmet Hourglass"]).toEqual([
+        HOURGLASS,
+        BURNED,
+      ]);
+      expect(oilAt(now)).toBeCloseTo(11.5625);
+    });
+
+    it.each([
+      [
+        "every recipe would be ready by now even unboosted",
+        () => farm(),
+        // Unboosted tail = T0 + 192h.
+        T0 + 192 * HOUR,
+      ],
+      [
+        "a lifted building whose queue was done by the lift even unboosted",
+        () => farm({ lifted: { removedAt: T0 + 192 * HOUR } }),
+        T0 + 60 * DAY,
+      ],
+      [
+        "a finished recipe on the work burn (same oil however fast it cooked)",
+        () => {
+          const game = farm({
+            crafting: [
+              {
+                name: "Creamy Truffle Risotto",
+                readyAt: 0,
+                startedAt: T0,
+                baseDurationMs: RISOTTO,
+                oilBoost: 0.25,
+                oilRate: 5,
+              },
+            ],
+          });
+          const kitchen = game.buildings.Kitchen?.[0];
+          if (kitchen) {
+            kitchen.oil = 20;
+            kitchen.oilSettledAt = T0;
+          }
+          return game;
+        },
+        T0 + 8 * DAY,
+      ],
+      [
+        "a finished oil-boosted recipe in a building that still deducts oil per recipe",
+        () =>
+          farm({
+            crafting: [
+              {
+                name: "Creamy Truffle Risotto",
+                readyAt: 0,
+                startedAt: T0,
+                baseDurationMs: RISOTTO,
+                oilBoost: 0.25,
+              },
+            ],
+          }),
+        T0 + 8 * DAY,
+      ],
+      [
+        "a clock-burn recipe a settle has already pinned (zero work)",
+        () => {
+          // Settled at T0 + 2h: the clock-burn head was pinned at its finish,
+          // and the work-burn recipe behind it finished long ago.
+          const game = farm({
+            crafting: [
+              {
+                name: "Creamy Truffle Risotto",
+                readyAt: T0 + HOUR,
+                startedAt: T0 + HOUR,
+                baseDurationMs: 0,
+                oilBoost: 0.25,
+              },
+              {
+                name: "Creamy Truffle Risotto",
+                readyAt: 0,
+                baseDurationMs: RISOTTO,
+                oilBoost: 0.25,
+                oilRate: 5,
+              },
+            ],
+          });
+          const kitchen = game.buildings.Kitchen?.[0];
+          if (kitchen) {
+            kitchen.oil = 20;
+            kitchen.oilSettledAt = T0 + 2 * HOUR;
+          }
+          return game;
+        },
+        T0 + 8 * DAY,
+      ],
+      [
+        "a legacy queue (fixed ready times)",
+        () =>
+          farm({
+            crafting: [
+              { name: "Creamy Truffle Risotto", readyAt: T0 + 300 * HOUR },
+            ],
+          }),
+        T0 + 187 * HOUR,
+      ],
+    ])("does not hold history back for %s", (_label, makeGame, now) => {
+      // A finished queue cannot change readiness however many windows it loses,
+      // so an uncollected dish must not pin history forever.
+      const game = makeGame();
+
+      appendBoostHistory(game, "Gourmet Hourglass", BURNED, now);
+
+      expect(game.boostHistory?.["Gourmet Hourglass"]).toEqual([BURNED]);
+    });
+  });
+
+  it("records for any temporary collectible (future-proof, even if not windowed yet)", () => {
+    const game = { ...TEST_FARM, boostHistory: {} } as GameState;
+    appendBoostHistory(game, "Ore Hourglass", { from: 1000, to: 2000 }, 2000);
+    expect(game.boostHistory?.["Ore Hourglass"]).toEqual([
+      { from: 1000, to: 2000 },
+    ]);
+  });
+
+  it("ignores empty/zero-length windows", () => {
+    const game = { ...TEST_FARM, boostHistory: {} } as GameState;
+    appendBoostHistory(game, "Sparrow Shrine", { from: 2000, to: 2000 }, 2000);
+    expect(game.boostHistory?.["Sparrow Shrine"]).toBeUndefined();
+  });
+});
+
+describe("getPowerHourWindows", () => {
+  const startedAt = Date.UTC(2026, 8, 13);
+  const speed = CROP_PLOT_BOOST_SPEED["Power hour"];
+
+  const powerHourFarm = (overrides: Partial<GameState> = {}): GameState =>
+    ({
+      ...TEST_FARM,
+      boostHistory: undefined,
+      buffs: { "Power hour": { startedAt, durationMS: HOUR } },
+      ...overrides,
+    }) as GameState;
+
+  it("runs the live Power Hour for its duration", () => {
+    expect(getPowerHourWindows(powerHourFarm())).toEqual([
+      { from: startedAt, to: startedAt + HOUR, speed },
+    ]);
+  });
+
+  it("includes archived Power Hour windows", () => {
+    const game = powerHourFarm({
+      boostHistory: {
+        "Power hour": [
+          { from: startedAt - 48 * HOUR, to: startedAt - 47 * HOUR },
+        ],
+      },
+    });
+
+    expect(getPowerHourWindows(game)).toEqual([
+      { from: startedAt - 48 * HOUR, to: startedAt - 47 * HOUR, speed },
+      { from: startedAt, to: startedAt + HOUR, speed },
+    ]);
+  });
+
+  it("does not double-count an archived window that is still live", () => {
+    const game = powerHourFarm({
+      boostHistory: {
+        "Power hour": [{ from: startedAt, to: startedAt + HOUR }],
+      },
+    });
+
+    expect(getPowerHourWindows(game)).toEqual([
+      { from: startedAt, to: startedAt + HOUR, speed },
+    ]);
+  });
+
+  it("merges overlapping Power Hour windows instead of stacking them", () => {
+    const game = powerHourFarm({
+      boostHistory: {
+        "Power hour": [
+          { from: startedAt - HOUR / 2, to: startedAt + HOUR / 2 },
+        ],
+      },
+    });
+
+    expect(getPowerHourWindows(game)).toEqual([
+      { from: startedAt - HOUR / 2, to: startedAt + HOUR, speed },
+    ]);
+  });
+
+  it("reads archived windows without a live Power Hour", () => {
+    const game = powerHourFarm({
+      buffs: undefined,
+      boostHistory: {
+        "Power hour": [{ from: startedAt, to: startedAt + HOUR }],
+      },
+    });
+
+    expect(getPowerHourWindows(game)).toEqual([
+      { from: startedAt, to: startedAt + HOUR, speed },
+    ]);
+  });
+});
+
+describe("sunshower windows", () => {
+  const DAY = 24 * HOUR;
+  // A Sunday: the next UTC day starts a new season week.
+  const eventDay = Date.UTC(2026, 8, 13);
+
+  const guardianFor = (at: number) =>
+    getObjectEntries(GUARDIAN_BOOST).find(
+      ([, { season }]) => season === populateSeason(at).season,
+    )![0];
+
+  const sunshowerFarm = (overrides: Partial<GameState> = {}): GameState =>
+    ({
+      ...TEST_FARM,
+      boostHistory: undefined,
+      collectibles: {},
+      season: populateSeason(eventDay),
+      calendar: {
+        dates: [],
+        sunshower: { startedAt: eventDay, triggeredAt: eventDay },
+      },
+      ...overrides,
+    }) as GameState;
+
+  describe("getSunshowerWindows", () => {
+    it("runs the live sunshower to the next UTC midnight at 2×", () => {
+      expect(getSunshowerWindows(sunshowerFarm())).toEqual([
+        {
+          from: eventDay,
+          to: eventDay + DAY,
+          speed: CROP_PLOT_BOOST_SPEED.sunshower,
+        },
+      ]);
+    });
+
+    it("includes archived sunshower windows", () => {
+      const game = {
+        ...TEST_FARM,
+        calendar: { dates: [] },
+        boostHistory: { Sunshower: [{ from: 0, to: DAY }] },
+      } as GameState;
+
+      expect(getSunshowerWindows(game)).toEqual([
+        { from: 0, to: DAY, speed: CROP_PLOT_BOOST_SPEED.sunshower },
+      ]);
+    });
+
+    it("does not double-count an archived window that is still live", () => {
+      const game = sunshowerFarm({
+        boostHistory: { Sunshower: [{ from: eventDay, to: eventDay + DAY }] },
+      });
+
+      expect(getSunshowerWindows(game)).toEqual([
+        {
+          from: eventDay,
+          to: eventDay + DAY,
+          speed: CROP_PLOT_BOOST_SPEED.sunshower,
+        },
+      ]);
+    });
+  });
+
+  describe("getSunshowerGuardianWindows", () => {
+    const speed = CROP_PLOT_BOOST_SPEED.sunshowerGuardian;
+
+    it("covers the whole sunshower for a Guardian placed before tracking existed", () => {
+      const game = sunshowerFarm({
+        collectibles: {
+          [guardianFor(eventDay)]: [{ id: "1", coordinates: { x: 0, y: 0 } }],
+        },
+      });
+
+      expect(getSunshowerGuardianWindows(game)).toEqual([
+        { from: eventDay, to: eventDay + DAY, speed },
+      ]);
+    });
+
+    it("counts a Guardian placed mid-sunshower only from when it was placed", () => {
+      const game = sunshowerFarm({
+        collectibles: {
+          [guardianFor(eventDay)]: [
+            {
+              id: "1",
+              coordinates: { x: 0, y: 0 },
+              placedAt: eventDay + 6 * HOUR,
+            },
+          ],
+        },
+      });
+
+      expect(getSunshowerGuardianWindows(game)).toEqual([
+        { from: eventDay + 6 * HOUR, to: eventDay + DAY, speed },
+      ]);
+    });
+
+    it("counts archived Guardian placements only while they overlapped the sunshower", () => {
+      const guardian = guardianFor(eventDay);
+      const game = sunshowerFarm({
+        collectibles: { [guardian]: [{ id: "1" }] },
+        boostHistory: {
+          [guardian]: [
+            { from: eventDay - DAY, to: eventDay + 3 * HOUR },
+            { from: eventDay + 10 * HOUR, to: eventDay + 12 * HOUR },
+          ],
+        },
+      });
+
+      expect(getSunshowerGuardianWindows(game)).toEqual([
+        { from: eventDay, to: eventDay + 3 * HOUR, speed },
+        { from: eventDay + 10 * HOUR, to: eventDay + 12 * HOUR, speed },
+      ]);
+    });
+
+    it("uses the Guardian for the sunshower day's season, not the in-game season", () => {
+      const rolledOver = { season: populateSeason(eventDay + DAY) };
+
+      expect(
+        getSunshowerGuardianWindows(
+          sunshowerFarm({
+            ...rolledOver,
+            collectibles: {
+              [guardianFor(eventDay + DAY)]: [
+                { id: "1", coordinates: { x: 0, y: 0 } },
+              ],
+            },
+          }),
+        ),
+      ).toEqual([]);
+
+      expect(
+        getSunshowerGuardianWindows(
+          sunshowerFarm({
+            ...rolledOver,
+            collectibles: {
+              [guardianFor(eventDay)]: [
+                { id: "1", coordinates: { x: 0, y: 0 } },
+              ],
+            },
+          }),
+        ),
+      ).toEqual([{ from: eventDay, to: eventDay + DAY, speed }]);
+    });
+
+    it("does not stack two placed copies of the Guardian", () => {
+      const game = sunshowerFarm({
+        collectibles: {
+          [guardianFor(eventDay)]: [
+            { id: "1", coordinates: { x: 0, y: 0 } },
+            { id: "2", coordinates: { x: 3, y: 0 }, placedAt: eventDay },
+          ],
+        },
+      });
+
+      expect(getSunshowerGuardianWindows(game)).toEqual([
+        { from: eventDay, to: eventDay + DAY, speed },
+      ]);
+    });
+
+    it("limits windows to one Guardian when asked", () => {
+      const game = sunshowerFarm({
+        collectibles: {
+          [guardianFor(eventDay)]: [{ id: "1", coordinates: { x: 0, y: 0 } }],
+        },
+      });
+
+      expect(getSunshowerGuardianWindows(game, guardianFor(eventDay))).toEqual([
+        { from: eventDay, to: eventDay + DAY, speed },
+      ]);
+      expect(
+        getSunshowerGuardianWindows(game, guardianFor(eventDay + DAY)),
+      ).toEqual([]);
+    });
+
+    it("has no windows without a sunshower", () => {
+      const game = sunshowerFarm({
+        calendar: { dates: [] },
+        collectibles: {
+          [guardianFor(eventDay)]: [{ id: "1", coordinates: { x: 0, y: 0 } }],
+        },
+      });
+
+      expect(getSunshowerGuardianWindows(game)).toEqual([]);
+    });
+  });
+
+  describe("getCropPlotBoostWindows", () => {
+    it("stacks a placed Guardian on the sunshower for 4×", () => {
+      const game = sunshowerFarm({
+        collectibles: {
+          [guardianFor(eventDay)]: [{ id: "1", coordinates: { x: 0, y: 0 } }],
+        },
+      });
+
+      // 16h of work planted 4h before midnight: 4h at 4× finishes it.
+      expect(
+        computeReadyAt({
+          startedAt: eventDay + 20 * HOUR,
+          baseDurationMs: 16 * HOUR,
+          windows: getCropPlotBoostWindows(game),
+        }),
+      ).toEqual(eventDay + DAY);
+    });
+  });
+});
+
+describe("getTreeBoostWindows", () => {
+  const createdAt = 1_000_000;
+
+  it("builds a window for an active Timber Hourglass at the tree speed", () => {
+    const windows = getTreeBoostWindows({
+      ...TEST_FARM,
+      collectibles: {
+        ...TEST_FARM.collectibles,
+        "Timber Hourglass": [
+          { id: "1", coordinates: { x: 0, y: 0 }, createdAt },
+        ],
+      },
+    });
+
+    expect(windows).toContainEqual({
+      from: createdAt,
+      to: createdAt + EXPIRY_COOLDOWNS["Timber Hourglass"],
+      speed: TREE_BOOST_SPEED["Timber Hourglass"],
+    });
+  });
+
+  it("includes the Badger Shrine at the tree speed", () => {
+    const windows = getTreeBoostWindows({
+      ...TEST_FARM,
+      collectibles: {
+        ...TEST_FARM.collectibles,
+        "Badger Shrine": [{ id: "1", coordinates: { x: 0, y: 0 }, createdAt }],
+      },
+    });
+
+    expect(windows).toContainEqual({
+      from: createdAt,
+      to: createdAt + EXPIRY_COOLDOWNS["Badger Shrine"],
+      speed: TREE_BOOST_SPEED["Badger Shrine"],
+    });
+  });
+
+  it("merges Super Totem & Time Warp Totem into one 2× window (no stacking)", () => {
+    const windows = getTreeBoostWindows({
+      ...TEST_FARM,
+      collectibles: {
+        ...TEST_FARM.collectibles,
+        "Super Totem": [{ id: "1", coordinates: { x: 0, y: 0 }, createdAt }],
+        "Time Warp Totem": [
+          { id: "2", coordinates: { x: 1, y: 1 }, createdAt },
+        ],
+      },
+    });
+
+    // Both totems share 2× and merge into a single window, not two stacked.
+    const totemWindows = windows.filter(
+      (w) => w.speed === TREE_BOOST_SPEED["Super Totem"],
+    );
+    expect(totemWindows).toEqual([
+      {
+        from: createdAt,
+        to: createdAt + EXPIRY_COOLDOWNS["Super Totem"],
+        speed: TREE_BOOST_SPEED["Super Totem"],
+      },
+    ]);
+  });
+
+  it("includes a removed/burned Timber Hourglass via boostHistory", () => {
+    // The booster is gone from collectibles, but its finalised window survives
+    // in boostHistory so an in-progress tree still gets the recovered credit.
+    const from = 1_000_000;
+    const to = from + EXPIRY_COOLDOWNS["Timber Hourglass"];
+    const windows = getTreeBoostWindows({
+      ...TEST_FARM,
+      collectibles: {},
+      boostHistory: { "Timber Hourglass": [{ from, to }] },
+    });
+
+    expect(windows).toContainEqual({
+      from,
+      to,
+      speed: TREE_BOOST_SPEED["Timber Hourglass"],
+    });
+  });
+
+  it("returns no windows when none are placed", () => {
+    expect(getTreeBoostWindows(TEST_FARM)).toEqual([]);
+  });
+});
+
+describe("FRUIT_BOOST_SPEED", () => {
+  it("has the exact tuned multipliers", () => {
+    expect(FRUIT_BOOST_SPEED).toEqual({
+      "Super Totem": 2,
+      "Time Warp Totem": 2,
+      "Orchard Hourglass": 1.35,
+      "Toucan Shrine": 1.35,
+      "Turbofruit Mix": 1.25,
+    });
+  });
+});
+
+describe("getFruitBoostWindows", () => {
+  const createdAt = 1_000_000;
+
+  it("builds a window for an active Orchard Hourglass at the fruit speed", () => {
+    const windows = getFruitBoostWindows({
+      ...TEST_FARM,
+      collectibles: {
+        ...TEST_FARM.collectibles,
+        "Orchard Hourglass": [
+          { id: "1", coordinates: { x: 0, y: 0 }, createdAt },
+        ],
+      },
+    });
+
+    expect(windows).toContainEqual({
+      from: createdAt,
+      to: createdAt + EXPIRY_COOLDOWNS["Orchard Hourglass"],
+      speed: FRUIT_BOOST_SPEED["Orchard Hourglass"],
+    });
+  });
+
+  it("includes the Toucan Shrine at the fruit speed", () => {
+    const windows = getFruitBoostWindows({
+      ...TEST_FARM,
+      collectibles: {
+        ...TEST_FARM.collectibles,
+        "Toucan Shrine": [{ id: "1", coordinates: { x: 0, y: 0 }, createdAt }],
+      },
+    });
+
+    expect(windows).toContainEqual({
+      from: createdAt,
+      to: createdAt + EXPIRY_COOLDOWNS["Toucan Shrine"],
+      speed: FRUIT_BOOST_SPEED["Toucan Shrine"],
+    });
+  });
+
+  it("merges Super Totem & Time Warp Totem into one 2× window (no stacking)", () => {
+    const windows = getFruitBoostWindows({
+      ...TEST_FARM,
+      collectibles: {
+        ...TEST_FARM.collectibles,
+        "Super Totem": [{ id: "1", coordinates: { x: 0, y: 0 }, createdAt }],
+        "Time Warp Totem": [
+          { id: "2", coordinates: { x: 1, y: 1 }, createdAt },
+        ],
+      },
+    });
+
+    const totemWindows = windows.filter(
+      (w) => w.speed === FRUIT_BOOST_SPEED["Super Totem"],
+    );
+    expect(totemWindows).toEqual([
+      {
+        from: createdAt,
+        to: createdAt + EXPIRY_COOLDOWNS["Super Totem"],
+        speed: FRUIT_BOOST_SPEED["Super Totem"],
+      },
+    ]);
+  });
+
+  it("Orchard Hourglass and Toucan Shrine stack MULTIPLICATIVELY over an overlap", () => {
+    const windows = getFruitBoostWindows({
+      ...TEST_FARM,
+      collectibles: {
+        ...TEST_FARM.collectibles,
+        "Orchard Hourglass": [
+          { id: "1", coordinates: { x: 0, y: 0 }, createdAt },
+        ],
+        "Toucan Shrine": [{ id: "2", coordinates: { x: 1, y: 1 }, createdAt }],
+      },
+    });
+
+    // Effective speed during the overlap = 1.35 × 1.35 = 1.8225.
+    const speed = getEffectiveSpeedAt({ at: createdAt + 1000, windows });
+    expect(speed).toBeCloseTo(
+      FRUIT_BOOST_SPEED["Orchard Hourglass"] *
+        FRUIT_BOOST_SPEED["Toucan Shrine"],
+      10,
+    );
+  });
+
+  it("includes a removed/burned Orchard Hourglass via boostHistory", () => {
+    const from = 1_000_000;
+    const to = from + EXPIRY_COOLDOWNS["Orchard Hourglass"];
+    const windows = getFruitBoostWindows({
+      ...TEST_FARM,
+      collectibles: {},
+      boostHistory: { "Orchard Hourglass": [{ from, to }] },
+    });
+
+    expect(windows).toContainEqual({
+      from,
+      to,
+      speed: FRUIT_BOOST_SPEED["Orchard Hourglass"],
+    });
+  });
+
+  it("returns no windows when none are placed", () => {
+    expect(getFruitBoostWindows(TEST_FARM)).toEqual([]);
+  });
+});
+
+describe("FLOWER_BOOST_SPEED", () => {
+  it("has the exact tuned multipliers", () => {
+    expect(FLOWER_BOOST_SPEED).toEqual({
+      "Blossom Hourglass": 1.35,
+      "Moth Shrine": 1.35,
+    });
+  });
+});
+
+describe("getFlowerBoostWindows", () => {
+  const createdAt = 1_000_000;
+
+  it("builds a window for an active Blossom Hourglass at the flower speed", () => {
+    const windows = getFlowerBoostWindows({
+      ...TEST_FARM,
+      collectibles: {
+        ...TEST_FARM.collectibles,
+        "Blossom Hourglass": [
+          { id: "1", coordinates: { x: 0, y: 0 }, createdAt },
+        ],
+      },
+    });
+
+    expect(windows).toContainEqual({
+      from: createdAt,
+      to: createdAt + EXPIRY_COOLDOWNS["Blossom Hourglass"],
+      speed: FLOWER_BOOST_SPEED["Blossom Hourglass"],
+    });
+  });
+
+  it("includes the Moth Shrine time boost at the flower speed", () => {
+    const windows = getFlowerBoostWindows({
+      ...TEST_FARM,
+      collectibles: {
+        ...TEST_FARM.collectibles,
+        "Moth Shrine": [{ id: "1", coordinates: { x: 0, y: 0 }, createdAt }],
+      },
+    });
+
+    expect(windows).toContainEqual({
+      from: createdAt,
+      to: createdAt + EXPIRY_COOLDOWNS["Moth Shrine"],
+      speed: FLOWER_BOOST_SPEED["Moth Shrine"],
+    });
+  });
+
+  it("does NOT include totems (flowers get no totem boost)", () => {
+    const windows = getFlowerBoostWindows({
+      ...TEST_FARM,
+      collectibles: {
+        ...TEST_FARM.collectibles,
+        "Super Totem": [{ id: "1", coordinates: { x: 0, y: 0 }, createdAt }],
+        "Time Warp Totem": [
+          { id: "2", coordinates: { x: 1, y: 1 }, createdAt },
+        ],
+      },
+    });
+
+    expect(windows).toEqual([]);
+  });
+
+  it("Blossom Hourglass and Moth Shrine stack MULTIPLICATIVELY over an overlap", () => {
+    const windows = getFlowerBoostWindows({
+      ...TEST_FARM,
+      collectibles: {
+        ...TEST_FARM.collectibles,
+        "Blossom Hourglass": [
+          { id: "1", coordinates: { x: 0, y: 0 }, createdAt },
+        ],
+        "Moth Shrine": [{ id: "2", coordinates: { x: 1, y: 1 }, createdAt }],
+      },
+    });
+
+    // Effective speed during the overlap = 1.35 × 1.35 = 1.8225.
+    const speed = getEffectiveSpeedAt({ at: createdAt + 1000, windows });
+    expect(speed).toBeCloseTo(
+      FLOWER_BOOST_SPEED["Blossom Hourglass"] *
+        FLOWER_BOOST_SPEED["Moth Shrine"],
+      10,
+    );
+  });
+
+  it("includes a removed/burned Blossom Hourglass via boostHistory", () => {
+    const from = 1_000_000;
+    const to = from + EXPIRY_COOLDOWNS["Blossom Hourglass"];
+    const windows = getFlowerBoostWindows({
+      ...TEST_FARM,
+      collectibles: {},
+      boostHistory: { "Blossom Hourglass": [{ from, to }] },
+    });
+
+    expect(windows).toContainEqual({
+      from,
+      to,
+      speed: FLOWER_BOOST_SPEED["Blossom Hourglass"],
+    });
+  });
+
+  it("returns no windows when none are placed", () => {
+    expect(getFlowerBoostWindows(TEST_FARM)).toEqual([]);
+  });
+});
+
+describe("getOilBoostWindows", () => {
+  const createdAt = 1_000_000;
+
+  it("builds a window for an active Stag Shrine at the oil speed", () => {
+    const windows = getOilBoostWindows({
+      ...TEST_FARM,
+      collectibles: {
+        ...TEST_FARM.collectibles,
+        "Stag Shrine": [{ id: "1", coordinates: { x: 0, y: 0 }, createdAt }],
+      },
+    });
+
+    expect(windows).toContainEqual({
+      from: createdAt,
+      to: createdAt + EXPIRY_COOLDOWNS["Stag Shrine"],
+      speed: OIL_BOOST_SPEED["Stag Shrine"],
+    });
+  });
+
+  it("does NOT include totems (oil gets no totem boost)", () => {
+    const windows = getOilBoostWindows({
+      ...TEST_FARM,
+      collectibles: {
+        ...TEST_FARM.collectibles,
+        "Super Totem": [{ id: "1", coordinates: { x: 0, y: 0 }, createdAt }],
+        "Time Warp Totem": [
+          { id: "2", coordinates: { x: 1, y: 1 }, createdAt },
+        ],
+      },
+    });
+
+    expect(windows).toEqual([]);
+  });
+
+  it("includes a removed/burned Stag Shrine via boostHistory", () => {
+    const from = 1_000_000;
+    const to = from + EXPIRY_COOLDOWNS["Stag Shrine"];
+    const windows = getOilBoostWindows({
+      ...TEST_FARM,
+      collectibles: {},
+      boostHistory: { "Stag Shrine": [{ from, to }] },
+    });
+
+    expect(windows).toContainEqual({
+      from,
+      to,
+      speed: OIL_BOOST_SPEED["Stag Shrine"],
+    });
+  });
+
+  it("returns no windows when none are placed", () => {
+    expect(getOilBoostWindows(TEST_FARM)).toEqual([]);
+  });
+});
+
+describe("getTurbofruitMixWindows", () => {
+  const fertilisedAt = 1_000_000;
+
+  it("returns no window when the patch has no fertiliser", () => {
+    expect(getTurbofruitMixWindows(undefined)).toEqual([]);
+  });
+
+  it("returns no window for a non-Turbofruit fertiliser", () => {
+    expect(
+      getTurbofruitMixWindows({ name: "Fruitful Blend", fertilisedAt }),
+    ).toEqual([]);
+  });
+
+  it("builds an open-ended 1.25× window from fertilisedAt for Turbofruit Mix", () => {
+    expect(
+      getTurbofruitMixWindows({ name: "Turbofruit Mix", fertilisedAt }),
+    ).toEqual([
+      {
+        from: fertilisedAt,
+        to: Number.MAX_SAFE_INTEGER,
+        speed: FRUIT_BOOST_SPEED["Turbofruit Mix"],
+      },
+    ]);
+  });
+
+  it("keeps the segment maths finite over the far-future bound", () => {
+    // Edge case for the MAX_SAFE_INTEGER bound: a fruit under a Turbofruit window
+    // is ready long before the bound and computeReadyAt stays finite.
+    const startedAt = fertilisedAt;
+    const baseDurationMs = 10 * HOUR;
+    const readyAt = computeReadyAt({
+      startedAt,
+      baseDurationMs,
+      windows: getTurbofruitMixWindows({
+        name: "Turbofruit Mix",
+        fertilisedAt,
+      }),
+    });
+
+    // Whole grow is at 1.25× → wall-clock = base / 1.25.
+    expect(readyAt).toBe(
+      startedAt + baseDurationMs / FRUIT_BOOST_SPEED["Turbofruit Mix"],
+    );
+    expect(Number.isFinite(readyAt)).toBe(true);
+  });
+
+  it("only speeds work accrued AFTER it was applied mid-grow", () => {
+    const startedAt = 0;
+    const baseDurationMs = 10 * HOUR;
+    const midFertilisedAt = 2 * HOUR;
+    const readyAt = computeReadyAt({
+      startedAt,
+      baseDurationMs,
+      windows: getTurbofruitMixWindows({
+        name: "Turbofruit Mix",
+        fertilisedAt: midFertilisedAt,
+      }),
+    });
+
+    // First 2h at 1× (2h work), remaining 8h work at 1.25× → 8h / 1.25 = 6.4h.
+    expect(readyAt).toBe(
+      midFertilisedAt +
+        (baseDurationMs - 2 * HOUR) / FRUIT_BOOST_SPEED["Turbofruit Mix"],
+    );
+  });
+
+  it("stacks MULTIPLICATIVELY with the collectible fruit windows", () => {
+    const startedAt = 0;
+    const baseDurationMs = 10 * HOUR;
+    const orchard: BoostWindow[] = [
+      {
+        from: 0,
+        to: Number.MAX_SAFE_INTEGER,
+        speed: FRUIT_BOOST_SPEED["Orchard Hourglass"],
+      },
+    ];
+    const turbo = getTurbofruitMixWindows({
+      name: "Turbofruit Mix",
+      fertilisedAt: 0,
+    });
+
+    const readyAt = computeReadyAt({
+      startedAt,
+      baseDurationMs,
+      windows: [...orchard, ...turbo],
+    });
+
+    // Both cover the whole grow → 1.35 × 1.25 effective speed.
+    expect(readyAt).toBe(
+      startedAt +
+        baseDurationMs /
+          (FRUIT_BOOST_SPEED["Orchard Hourglass"] *
+            FRUIT_BOOST_SPEED["Turbofruit Mix"]),
+    );
+  });
+});
+
+describe("getCropFertiliserWindows", () => {
+  const fertilisedAt = 1_000_000;
+
+  it("returns no window when the plot has no fertiliser", () => {
+    expect(getCropFertiliserWindows(undefined)).toEqual([]);
+  });
+
+  it("returns no window for a non-speed fertiliser (Sprout Mix)", () => {
+    expect(
+      getCropFertiliserWindows({ name: "Sprout Mix", fertilisedAt }),
+    ).toEqual([]);
+  });
+
+  it("returns no window when the name is valid but fertilisedAt is missing (malformed state)", () => {
+    expect(
+      getCropFertiliserWindows({ name: "Rapid Root" } as CropFertiliser),
+    ).toEqual([]);
+  });
+
+  it("builds an open-ended 2× window from fertilisedAt for Rapid Root", () => {
+    expect(
+      getCropFertiliserWindows({ name: "Rapid Root", fertilisedAt }),
+    ).toEqual([
+      {
+        from: fertilisedAt,
+        to: Number.MAX_SAFE_INTEGER,
+        speed: CROP_PLOT_BOOST_SPEED["Rapid Root"],
+      },
+    ]);
+  });
+
+  it("builds an open-ended 2× window from fertilisedAt for Sproutroot Surprise", () => {
+    expect(
+      getCropFertiliserWindows({ name: "Sproutroot Surprise", fertilisedAt }),
+    ).toEqual([
+      {
+        from: fertilisedAt,
+        to: Number.MAX_SAFE_INTEGER,
+        speed: CROP_PLOT_BOOST_SPEED["Sproutroot Surprise"],
+      },
+    ]);
+  });
+
+  it("keeps the segment maths finite over the far-future bound", () => {
+    // Edge case for the MAX_SAFE_INTEGER bound: a crop under a fertiliser window
+    // is ready long before the bound and computeReadyAt stays finite.
+    const startedAt = fertilisedAt;
+    const baseDurationMs = 10 * HOUR;
+    const readyAt = computeReadyAt({
+      startedAt,
+      baseDurationMs,
+      windows: getCropFertiliserWindows({ name: "Rapid Root", fertilisedAt }),
+    });
+
+    // Whole grow is at 2× → wall-clock = base / 2.
+    expect(readyAt).toBe(
+      startedAt + baseDurationMs / CROP_PLOT_BOOST_SPEED["Rapid Root"],
+    );
+    expect(Number.isFinite(readyAt)).toBe(true);
+  });
+
+  it("only speeds work accrued AFTER it was applied mid-grow", () => {
+    const startedAt = 0;
+    const baseDurationMs = 10 * HOUR;
+    const midFertilisedAt = 2 * HOUR;
+    const readyAt = computeReadyAt({
+      startedAt,
+      baseDurationMs,
+      windows: getCropFertiliserWindows({
+        name: "Rapid Root",
+        fertilisedAt: midFertilisedAt,
+      }),
+    });
+
+    // First 2h at 1× (2h work), remaining 8h work at 2× → 8h / 2 = 4h.
+    expect(readyAt).toBe(
+      midFertilisedAt +
+        (baseDurationMs - 2 * HOUR) / CROP_PLOT_BOOST_SPEED["Rapid Root"],
+    );
+  });
+
+  it("stacks MULTIPLICATIVELY with the collectible crop windows", () => {
+    const startedAt = 0;
+    const baseDurationMs = 10 * HOUR;
+    const sparrow: BoostWindow[] = [
+      {
+        from: 0,
+        to: Number.MAX_SAFE_INTEGER,
+        speed: CROP_PLOT_BOOST_SPEED["Sparrow Shrine"],
+      },
+    ];
+    const rapidRoot = getCropFertiliserWindows({
+      name: "Rapid Root",
+      fertilisedAt: 0,
+    });
+
+    const readyAt = computeReadyAt({
+      startedAt,
+      baseDurationMs,
+      windows: [...sparrow, ...rapidRoot],
+    });
+
+    // Both cover the whole grow → 1.35 × 2 effective speed.
+    expect(readyAt).toBe(
+      startedAt +
+        baseDurationMs /
+          (CROP_PLOT_BOOST_SPEED["Sparrow Shrine"] *
+            CROP_PLOT_BOOST_SPEED["Rapid Root"]),
+    );
+  });
+});
+
+describe("MINE_BOOST_SPEED", () => {
+  it("has the exact tuned multipliers", () => {
+    expect(MINE_BOOST_SPEED).toEqual({
+      "Super Totem": 2,
+      "Time Warp Totem": 2,
+      "Ore Hourglass": 2,
+      "Badger Shrine": 1.35,
+      "Mole Shrine": 1.35,
+    });
+  });
+});
+
+describe("getMineBoostWindows", () => {
+  const createdAt = 1_000_000;
+
+  const withCollectibles = (
+    collectibles: GameState["collectibles"],
+  ): GameState => ({
+    ...TEST_FARM,
+    collectibles: { ...TEST_FARM.collectibles, ...collectibles },
+  });
+
+  const placed = (id: string) => [
+    { id, coordinates: { x: 0, y: 0 }, createdAt },
+  ];
+
+  describe("Stone Rock", () => {
+    it("includes the Super Totem at speed 2", () => {
+      const windows = getMineBoostWindows(
+        withCollectibles({ "Super Totem": placed("1") }),
+        "Stone Rock",
+      );
+
+      expect(windows).toContainEqual({
+        from: createdAt,
+        to: createdAt + EXPIRY_COOLDOWNS["Super Totem"],
+        speed: MINE_BOOST_SPEED["Super Totem"],
+      });
+    });
+
+    it("includes the Badger Shrine at speed 1.35", () => {
+      const windows = getMineBoostWindows(
+        withCollectibles({ "Badger Shrine": placed("1") }),
+        "Stone Rock",
+      );
+
+      expect(windows).toContainEqual({
+        from: createdAt,
+        to: createdAt + EXPIRY_COOLDOWNS["Badger Shrine"],
+        speed: MINE_BOOST_SPEED["Badger Shrine"],
+      });
+    });
+
+    it("includes the Ore Hourglass at speed 2", () => {
+      const windows = getMineBoostWindows(
+        withCollectibles({ "Ore Hourglass": placed("1") }),
+        "Stone Rock",
+      );
+
+      expect(windows).toContainEqual({
+        from: createdAt,
+        to: createdAt + EXPIRY_COOLDOWNS["Ore Hourglass"],
+        speed: MINE_BOOST_SPEED["Ore Hourglass"],
+      });
+    });
+
+    it("merges both totems into a single 2× window (no stacking)", () => {
+      const windows = getMineBoostWindows(
+        withCollectibles({
+          "Super Totem": [{ id: "1", coordinates: { x: 0, y: 0 }, createdAt }],
+          "Time Warp Totem": [
+            { id: "2", coordinates: { x: 1, y: 1 }, createdAt },
+          ],
+        }),
+        "Stone Rock",
+      );
+
+      const totemWindows = windows.filter(
+        (w) => w.speed === MINE_BOOST_SPEED["Super Totem"],
+      );
+      expect(totemWindows).toEqual([
+        {
+          from: createdAt,
+          to: createdAt + EXPIRY_COOLDOWNS["Super Totem"],
+          speed: MINE_BOOST_SPEED["Super Totem"],
+        },
+      ]);
+    });
+
+    it("keeps a Totem, Ore Hourglass and Badger Shrine as SEPARATE windows that stack multiplicatively", () => {
+      const windows = getMineBoostWindows(
+        withCollectibles({
+          "Super Totem": placed("1"),
+          "Ore Hourglass": placed("2"),
+          "Badger Shrine": placed("3"),
+        }),
+        "Stone Rock",
+      );
+
+      // Independent categories do NOT merge — only the two totems merge with each
+      // other — so this is three distinct windows even though the Totem and Ore
+      // Hourglass both run at 2×.
+      expect(windows).toHaveLength(3);
+      expect(windows).toContainEqual({
+        from: createdAt,
+        to: createdAt + EXPIRY_COOLDOWNS["Super Totem"],
+        speed: MINE_BOOST_SPEED["Super Totem"],
+      });
+      expect(windows).toContainEqual({
+        from: createdAt,
+        to: createdAt + EXPIRY_COOLDOWNS["Ore Hourglass"],
+        speed: MINE_BOOST_SPEED["Ore Hourglass"],
+      });
+      expect(windows).toContainEqual({
+        from: createdAt,
+        to: createdAt + EXPIRY_COOLDOWNS["Badger Shrine"],
+        speed: MINE_BOOST_SPEED["Badger Shrine"],
+      });
+
+      // During the overlap the effective speed is the PRODUCT (2 × 2 × 1.35 = 5.4×):
+      // categories stack multiplicatively, NOT "highest speed wins".
+      expect(getEffectiveSpeedAt({ at: createdAt + 1, windows })).toEqual(
+        MINE_BOOST_SPEED["Super Totem"] *
+          MINE_BOOST_SPEED["Ore Hourglass"] *
+          MINE_BOOST_SPEED["Badger Shrine"],
+      );
+    });
+
+    it("does NOT include the Mole Shrine (stone uses Badger, not Mole)", () => {
+      const windows = getMineBoostWindows(
+        withCollectibles({ "Mole Shrine": placed("1") }),
+        "Stone Rock",
+      );
+
+      expect(windows).toEqual([]);
+    });
+
+    it("returns no windows when nothing is placed", () => {
+      expect(getMineBoostWindows(TEST_FARM, "Stone Rock")).toEqual([]);
+    });
+  });
+
+  describe.each<RockName>(["Iron Rock", "Gold Rock"])("%s", (rockName) => {
+    it("includes the Mole Shrine at speed 1.35", () => {
+      const windows = getMineBoostWindows(
+        withCollectibles({ "Mole Shrine": placed("1") }),
+        rockName,
+      );
+
+      expect(windows).toContainEqual({
+        from: createdAt,
+        to: createdAt + EXPIRY_COOLDOWNS["Mole Shrine"],
+        speed: MINE_BOOST_SPEED["Mole Shrine"],
+      });
+    });
+
+    it("includes the Ore Hourglass at speed 2", () => {
+      const windows = getMineBoostWindows(
+        withCollectibles({ "Ore Hourglass": placed("1") }),
+        rockName,
+      );
+
+      expect(windows).toContainEqual({
+        from: createdAt,
+        to: createdAt + EXPIRY_COOLDOWNS["Ore Hourglass"],
+        speed: MINE_BOOST_SPEED["Ore Hourglass"],
+      });
+    });
+
+    it("merges both totems into a single 2× window (no stacking)", () => {
+      const windows = getMineBoostWindows(
+        withCollectibles({
+          "Super Totem": [{ id: "1", coordinates: { x: 0, y: 0 }, createdAt }],
+          "Time Warp Totem": [
+            { id: "2", coordinates: { x: 1, y: 1 }, createdAt },
+          ],
+        }),
+        rockName,
+      );
+
+      const totemWindows = windows.filter(
+        (w) => w.speed === MINE_BOOST_SPEED["Super Totem"],
+      );
+      expect(totemWindows).toEqual([
+        {
+          from: createdAt,
+          to: createdAt + EXPIRY_COOLDOWNS["Super Totem"],
+          speed: MINE_BOOST_SPEED["Super Totem"],
+        },
+      ]);
+    });
+
+    it("keeps a Totem, Ore Hourglass and Mole Shrine as SEPARATE windows that stack multiplicatively", () => {
+      const windows = getMineBoostWindows(
+        withCollectibles({
+          "Super Totem": placed("1"),
+          "Ore Hourglass": placed("2"),
+          "Mole Shrine": placed("3"),
+        }),
+        rockName,
+      );
+
+      // Independent categories do NOT merge — three distinct windows.
+      expect(windows).toHaveLength(3);
+      expect(windows).toContainEqual({
+        from: createdAt,
+        to: createdAt + EXPIRY_COOLDOWNS["Super Totem"],
+        speed: MINE_BOOST_SPEED["Super Totem"],
+      });
+      expect(windows).toContainEqual({
+        from: createdAt,
+        to: createdAt + EXPIRY_COOLDOWNS["Ore Hourglass"],
+        speed: MINE_BOOST_SPEED["Ore Hourglass"],
+      });
+      expect(windows).toContainEqual({
+        from: createdAt,
+        to: createdAt + EXPIRY_COOLDOWNS["Mole Shrine"],
+        speed: MINE_BOOST_SPEED["Mole Shrine"],
+      });
+
+      // Effective speed during the overlap is the PRODUCT (2 × 2 × 1.35 = 5.4×).
+      expect(getEffectiveSpeedAt({ at: createdAt + 1, windows })).toEqual(
+        MINE_BOOST_SPEED["Super Totem"] *
+          MINE_BOOST_SPEED["Ore Hourglass"] *
+          MINE_BOOST_SPEED["Mole Shrine"],
+      );
+    });
+
+    it("does NOT include the Badger Shrine (iron/gold use Mole, not Badger)", () => {
+      const windows = getMineBoostWindows(
+        withCollectibles({ "Badger Shrine": placed("1") }),
+        rockName,
+      );
+
+      expect(windows).toEqual([]);
+    });
+  });
+
+  describe("Crimstone Rock", () => {
+    it("includes the Mole Shrine at speed 1.35", () => {
+      const windows = getMineBoostWindows(
+        withCollectibles({ "Mole Shrine": placed("1") }),
+        "Crimstone Rock",
+      );
+
+      expect(windows).toEqual([
+        {
+          from: createdAt,
+          to: createdAt + EXPIRY_COOLDOWNS["Mole Shrine"],
+          speed: MINE_BOOST_SPEED["Mole Shrine"],
+        },
+      ]);
+    });
+
+    it("does NOT include totems, Ore Hourglass or Badger Shrine", () => {
+      const windows = getMineBoostWindows(
+        withCollectibles({
+          "Super Totem": placed("1"),
+          "Time Warp Totem": [
+            { id: "2", coordinates: { x: 1, y: 1 }, createdAt },
+          ],
+          "Ore Hourglass": [
+            { id: "3", coordinates: { x: 2, y: 2 }, createdAt },
+          ],
+          "Badger Shrine": [
+            { id: "4", coordinates: { x: 3, y: 3 }, createdAt },
+          ],
+        }),
+        "Crimstone Rock",
+      );
+
+      expect(windows).toEqual([]);
+    });
+  });
+
+  describe("Sunstone Rock", () => {
+    it("always returns [] regardless of placed collectibles", () => {
+      const windows = getMineBoostWindows(
+        withCollectibles({
+          "Super Totem": placed("1"),
+          "Time Warp Totem": [
+            { id: "2", coordinates: { x: 1, y: 1 }, createdAt },
+          ],
+          "Ore Hourglass": [
+            { id: "3", coordinates: { x: 2, y: 2 }, createdAt },
+          ],
+          "Badger Shrine": [
+            { id: "4", coordinates: { x: 3, y: 3 }, createdAt },
+          ],
+          "Mole Shrine": [{ id: "5", coordinates: { x: 4, y: 4 }, createdAt }],
+        }),
+        "Sunstone Rock",
+      );
+
+      expect(windows).toEqual([]);
+    });
+  });
+
+  describe("tier-2/3 names map to the base family", () => {
+    it("Fused Stone Rock behaves like Stone Rock (gets Badger, not Mole)", () => {
+      const game = withCollectibles({
+        "Badger Shrine": placed("1"),
+        "Mole Shrine": [{ id: "2", coordinates: { x: 1, y: 1 }, createdAt }],
+      });
+
+      expect(getMineBoostWindows(game, "Fused Stone Rock")).toEqual(
+        getMineBoostWindows(game, "Stone Rock"),
+      );
+      // Stone family → Badger present, Mole absent.
+      expect(getMineBoostWindows(game, "Fused Stone Rock")).toContainEqual({
+        from: createdAt,
+        to: createdAt + EXPIRY_COOLDOWNS["Badger Shrine"],
+        speed: MINE_BOOST_SPEED["Badger Shrine"],
+      });
+    });
+
+    it("Prime Gold Rock behaves like Gold Rock (gets Mole, not Badger)", () => {
+      const game = withCollectibles({
+        "Mole Shrine": placed("1"),
+        "Badger Shrine": [{ id: "2", coordinates: { x: 1, y: 1 }, createdAt }],
+      });
+
+      expect(getMineBoostWindows(game, "Prime Gold Rock")).toEqual(
+        getMineBoostWindows(game, "Gold Rock"),
+      );
+      expect(getMineBoostWindows(game, "Prime Gold Rock")).toContainEqual({
+        from: createdAt,
+        to: createdAt + EXPIRY_COOLDOWNS["Mole Shrine"],
+        speed: MINE_BOOST_SPEED["Mole Shrine"],
+      });
+    });
+
+    it("Refined Iron Rock behaves like Iron Rock (gets Mole, not Badger)", () => {
+      const game = withCollectibles({
+        "Mole Shrine": placed("1"),
+        "Badger Shrine": [{ id: "2", coordinates: { x: 1, y: 1 }, createdAt }],
+      });
+
+      expect(getMineBoostWindows(game, "Refined Iron Rock")).toEqual(
+        getMineBoostWindows(game, "Iron Rock"),
+      );
+      expect(getMineBoostWindows(game, "Refined Iron Rock")).toContainEqual({
+        from: createdAt,
+        to: createdAt + EXPIRY_COOLDOWNS["Mole Shrine"],
+        speed: MINE_BOOST_SPEED["Mole Shrine"],
+      });
+    });
+  });
+});
+
+describe("GREENHOUSE_BOOST_SPEED", () => {
+  it("pins the greenhouse speeds", () => {
+    expect(GREENHOUSE_BOOST_SPEED).toEqual({
+      "Super Totem": 2,
+      "Time Warp Totem": 2,
+      "Harvest Hourglass": 1.35,
+      "Orchard Hourglass": 1.35,
+      "Tortoise Shrine": 1.5,
+      "Greenhouse Glow": 1.25,
+    });
+  });
+});
+
+describe("getGreenhouseBoostWindows", () => {
+  const createdAt = 1_000_000;
+
+  it("includes the Tortoise Shrine window for every plant", () => {
+    const game: GameState = {
+      ...TEST_FARM,
+      collectibles: {
+        ...TEST_FARM.collectibles,
+        "Tortoise Shrine": [
+          { id: "1", coordinates: { x: 0, y: 0 }, createdAt },
+        ],
+      },
+    };
+    const expected = {
+      from: createdAt,
+      to: createdAt + EXPIRY_COOLDOWNS["Tortoise Shrine"],
+      speed: GREENHOUSE_BOOST_SPEED["Tortoise Shrine"],
+    };
+
+    expect(getGreenhouseBoostWindows(game, "Rice")).toContainEqual(expected);
+    expect(getGreenhouseBoostWindows(game, "Olive")).toContainEqual(expected);
+    expect(getGreenhouseBoostWindows(game, "Grape")).toContainEqual(expected);
+  });
+
+  it("includes Harvest Hourglass for the greenhouse CROPS only", () => {
+    const game: GameState = {
+      ...TEST_FARM,
+      collectibles: {
+        ...TEST_FARM.collectibles,
+        "Harvest Hourglass": [
+          { id: "1", coordinates: { x: 0, y: 0 }, createdAt },
+        ],
+      },
+    };
+    const expected = {
+      from: createdAt,
+      to: createdAt + EXPIRY_COOLDOWNS["Harvest Hourglass"],
+      speed: GREENHOUSE_BOOST_SPEED["Harvest Hourglass"],
+    };
+
+    expect(getGreenhouseBoostWindows(game, "Rice")).toContainEqual(expected);
+    expect(getGreenhouseBoostWindows(game, "Olive")).toContainEqual(expected);
+    // Grape is a fruit — Harvest Hourglass never covered it.
+    expect(getGreenhouseBoostWindows(game, "Grape")).toEqual([]);
+  });
+
+  it("includes Orchard Hourglass for Grape only (windowed-model addition)", () => {
+    const game: GameState = {
+      ...TEST_FARM,
+      collectibles: {
+        ...TEST_FARM.collectibles,
+        "Orchard Hourglass": [
+          { id: "1", coordinates: { x: 0, y: 0 }, createdAt },
+        ],
+      },
+    };
+
+    expect(getGreenhouseBoostWindows(game, "Grape")).toContainEqual({
+      from: createdAt,
+      to: createdAt + EXPIRY_COOLDOWNS["Orchard Hourglass"],
+      speed: GREENHOUSE_BOOST_SPEED["Orchard Hourglass"],
+    });
+    expect(getGreenhouseBoostWindows(game, "Rice")).toEqual([]);
+    expect(getGreenhouseBoostWindows(game, "Olive")).toEqual([]);
+  });
+
+  it("merges Super Totem & Time Warp Totem into one 2× window (no stacking)", () => {
+    const windows = getGreenhouseBoostWindows(
+      {
+        ...TEST_FARM,
+        collectibles: {
+          ...TEST_FARM.collectibles,
+          "Super Totem": [{ id: "1", coordinates: { x: 0, y: 0 }, createdAt }],
+          "Time Warp Totem": [
+            { id: "2", coordinates: { x: 1, y: 1 }, createdAt },
+          ],
+        },
+      },
+      "Rice",
+    );
+
+    // Both totems share 2× and merge into a single window, not two stacked.
+    const totemWindows = windows.filter(
+      (w) => w.speed === GREENHOUSE_BOOST_SPEED["Super Totem"],
+    );
+    expect(totemWindows).toEqual([
+      {
+        from: createdAt,
+        to: createdAt + EXPIRY_COOLDOWNS["Super Totem"],
+        speed: GREENHOUSE_BOOST_SPEED["Super Totem"],
+      },
+    ]);
+  });
+
+  it("includes a burned Tortoise Shrine via boostHistory", () => {
+    // The shrine is gone from collectibles, but its finalised window survives
+    // in boostHistory so an in-progress plant keeps the earned credit.
+    const from = 1_000_000;
+    const to = from + EXPIRY_COOLDOWNS["Tortoise Shrine"];
+    const windows = getGreenhouseBoostWindows(
+      {
+        ...TEST_FARM,
+        collectibles: {},
+        boostHistory: { "Tortoise Shrine": [{ from, to }] },
+      },
+      "Rice",
+    );
+
+    expect(windows).toContainEqual({
+      from,
+      to,
+      speed: GREENHOUSE_BOOST_SPEED["Tortoise Shrine"],
+    });
+  });
+
+  it("returns no windows when none are placed", () => {
+    expect(getGreenhouseBoostWindows(TEST_FARM, "Rice")).toEqual([]);
+    expect(getGreenhouseBoostWindows(TEST_FARM, "Grape")).toEqual([]);
+  });
+});
+
+describe("getGreenhouseGlowWindows", () => {
+  it("returns an open-ended 1.25× window from fertilisedAt for Greenhouse Glow", () => {
+    const fertilisedAt = 1_000_000;
+
+    expect(
+      getGreenhouseGlowWindows({ name: "Greenhouse Glow", fertilisedAt }),
+    ).toEqual([
+      {
+        from: fertilisedAt,
+        to: Number.MAX_SAFE_INTEGER,
+        speed: GREENHOUSE_BOOST_SPEED["Greenhouse Glow"],
+      },
+    ]);
+  });
+
+  it("returns no window for Greenhouse Goodie (a yield compost)", () => {
+    expect(
+      getGreenhouseGlowWindows({ name: "Greenhouse Goodie", fertilisedAt: 1 }),
+    ).toEqual([]);
+  });
+
+  it("returns no window without a fertiliser", () => {
+    expect(getGreenhouseGlowWindows(undefined)).toEqual([]);
+  });
+
+  it("guards a malformed fertiliser with no fertilisedAt", () => {
+    expect(
+      getGreenhouseGlowWindows({
+        name: "Greenhouse Glow",
+      } as unknown as GreenhouseFertiliser),
+    ).toEqual([]);
+  });
+});
+
+describe("getAnimalBoostWindows", () => {
+  const createdAt = 1_000_000;
+
+  const withShrine = (name: "Collie Shrine" | "Bantam Shrine"): GameState => ({
+    ...TEST_FARM,
+    collectibles: {
+      ...TEST_FARM.collectibles,
+      [name]: [{ id: "1", coordinates: { x: 0, y: 0 }, createdAt }],
+    },
+  });
+
+  it("covers Cows and Sheep with the Collie Shrine", () => {
+    const game = withShrine("Collie Shrine");
+    const expected = {
+      from: createdAt,
+      to: createdAt + EXPIRY_COOLDOWNS["Collie Shrine"],
+      speed: ANIMAL_BOOST_SPEED["Collie Shrine"],
+    };
+
+    expect(getAnimalBoostWindows(game, "Cow")).toContainEqual(expected);
+    expect(getAnimalBoostWindows(game, "Sheep")).toContainEqual(expected);
+  });
+
+  it("covers Chickens with the Bantam Shrine", () => {
+    const game = withShrine("Bantam Shrine");
+
+    expect(getAnimalBoostWindows(game, "Chicken")).toContainEqual({
+      from: createdAt,
+      to: createdAt + EXPIRY_COOLDOWNS["Bantam Shrine"],
+      speed: ANIMAL_BOOST_SPEED["Bantam Shrine"],
+    });
+  });
+
+  it("gives Pigs NO windows from the Collie Shrine", () => {
+    // The Collie Shrine's own buff copy advertises Cows and Sheep only. An
+    // animal with no shrine of its own must fall through to no windows rather
+    // than inheriting the Collie's, which a `Chicken ? Bantam : Collie`
+    // ternary would silently do.
+    expect(getAnimalBoostWindows(withShrine("Collie Shrine"), "Pig")).toEqual(
+      [],
+    );
+  });
+
+  it("gives Pigs NO windows from the Bantam Shrine either", () => {
+    expect(getAnimalBoostWindows(withShrine("Bantam Shrine"), "Pig")).toEqual(
+      [],
+    );
+  });
+});
