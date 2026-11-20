@@ -23,6 +23,7 @@ import { TransactionCountdown } from "./Transaction";
 import { MarketplaceButton } from "./components/MarketplaceButton";
 import { FarmTasksButton } from "features/farmTasks/components/FarmTasksButton";
 import { AutoFarmButton } from "features/farmTasks/components/AutoFarmButton";
+import { MetaMaskButton } from "features/farmTasks/components/MetaMaskButton";
 import { PowerSkillsButton } from "./components/PowerSkillsButton";
 import {
   type BumpkinRevampSkillName,
@@ -118,6 +119,7 @@ const HudComponent: React.FC<{
         <MarketplaceButton />
         <FarmTasksButton />
         <AutoFarmButton />
+        <MetaMaskButton />
         {location === "interior" && <InteriorFloorNav floor="ground" />}
         {location === "level_one" && <InteriorFloorNav floor="level_one" />}
         <TravelButton location={location} />

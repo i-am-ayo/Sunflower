@@ -1,4 +1,4 @@
-import React, { useContext, useEffect, useState } from "react";
+import React, { useContext, useEffect, useRef, useState } from "react";
 import { useSelector } from "@xstate/react";
 
 import { Context } from "features/game/GameProvider";
@@ -14,6 +14,7 @@ import { PIXEL_SCALE } from "features/game/lib/constants";
 import { useNow } from "lib/utils/hooks/useNow";
 import { useAppTranslation } from "lib/i18n/useAppTranslations";
 import trophyIcon from "assets/icons/trophy.png";
+import metamaskIcon from "assets/icons/metamask_pixel.png";
 
 import {
   applyAutoPlay,
@@ -36,6 +37,17 @@ import {
   loadTaskState,
   saveTaskState,
 } from "../lib/storage";
+import {
+  connectMetaMask,
+  creditWalletReward,
+  disconnectWallet,
+  loadWalletAddress,
+  loadWalletRewards,
+  saveWalletAddress,
+  shortenAddress,
+  WALLET_CHANGE_EVENT,
+  type WalletRewards,
+} from "../lib/wallet";
 
 const _farmActivity = (state: MachineState) => state.context.state.farmActivity;
 const _username = (state: MachineState) => state.context.state.username;
@@ -78,6 +90,14 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide }) => {
     () => loadTaskState(storageKey, Date.now()) ?? createTaskState(Date.now()),
   );
 
+  const [walletAddress, setWalletAddress] = useState<string | undefined>(
+    loadWalletAddress,
+  );
+  const [rewards, setRewards] = useState<WalletRewards>(loadWalletRewards);
+  const [walletError, setWalletError] = useState<string>();
+  // Stars already paid to the connected wallet, so only new claims are credited.
+  const creditedStars = useRef(taskState.stars);
+
   const now = useNow({
     live: show || taskState.autoPlay,
     intervalMs: 1000,
@@ -111,6 +131,25 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide }) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [taskState, farmActivity, now]);
 
+  // The HUD button can also connect/disconnect the wallet.
+  useEffect(() => {
+    const sync = () => {
+      setWalletAddress(loadWalletAddress());
+      setRewards(loadWalletRewards());
+    };
+    window.addEventListener(WALLET_CHANGE_EVENT, sync);
+    return () => window.removeEventListener(WALLET_CHANGE_EVENT, sync);
+  }, []);
+
+  // Pay stars earned since the last claim into the connected wallet.
+  useEffect(() => {
+    const delta = taskState.stars - creditedStars.current;
+    creditedStars.current = taskState.stars;
+    if (delta <= 0 || !walletAddress) return;
+
+    setRewards(creditWalletReward(walletAddress, delta));
+  }, [taskState.stars, walletAddress]);
+
   const stage = FARM_TASK_STAGES[taskState.stage - 1];
   const attempt = taskState.attempt;
   const goals = getGoalProgress(taskState, farmActivity);
@@ -120,6 +159,26 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide }) => {
 
   const handleStart = () => update(startStage(taskState, now, farmActivity));
   const handleClaim = () => update(claimStage(taskState, farmActivity, now));
+
+  const handleConnect = async () => {
+    try {
+      const address = await connectMetaMask();
+      saveWalletAddress(address);
+      setWalletError(undefined);
+    } catch (e) {
+      const code = e instanceof Error ? e.message : "";
+      setWalletError(
+        code === "METAMASK_MISSING"
+          ? t("farmTasks.wallet.missing")
+          : t("farmTasks.wallet.rejected"),
+      );
+    }
+  };
+
+  const handleDisconnect = () => {
+    disconnectWallet();
+    setWalletError(undefined);
+  };
 
   return (
     <Modal show={show} onHide={onHide}>
@@ -145,6 +204,46 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide }) => {
           </div>
 
           <p className="text-xxs mb-2">{t("farmTasks.subtitle")}</p>
+
+          <div className="flex items-center justify-between mb-1">
+            <div className="flex items-center space-x-1 min-w-0">
+              <img src={metamaskIcon} className="w-4" />
+              {walletAddress ? (
+                <span className="text-xxs truncate">
+                  {t("farmTasks.wallet.connected", {
+                    address: shortenAddress(walletAddress),
+                  })}
+                </span>
+              ) : (
+                <span className="text-xxs opacity-70">
+                  {t("farmTasks.wallet.connectHint")}
+                </span>
+              )}
+            </div>
+
+            {walletAddress ? (
+              <div className="flex items-center space-x-1">
+                <img src={trophyIcon} className="w-4" />
+                <span className="text-xs">{rewards[walletAddress] ?? 0}</span>
+                <span
+                  className="text-xxs underline cursor-pointer"
+                  onClick={handleDisconnect}
+                >
+                  {t("farmTasks.wallet.disconnect")}
+                </span>
+              </div>
+            ) : (
+              <span
+                className="text-xxs underline cursor-pointer"
+                onClick={handleConnect}
+              >
+                {t("farmTasks.wallet.connect")}
+              </span>
+            )}
+          </div>
+          {walletError && (
+            <p className="text-xxs text-red-500 mb-1">{walletError}</p>
+          )}
 
           <Switch
             checked={taskState.autoPlay}
