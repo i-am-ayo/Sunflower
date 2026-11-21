@@ -38,6 +38,12 @@ import {
   saveTaskState,
 } from "../lib/storage";
 import {
+  MEADOW_CHAIN,
+  claimOnchainFaucet,
+  readOnchainTom,
+  type OnchainTomState,
+} from "../lib/onchain";
+import {
   connectMetaMask,
   creditWalletReward,
   disconnectWallet,
@@ -96,6 +102,10 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide, onOpen }) => {
   );
   const [rewards, setRewards] = useState<WalletRewards>(loadWalletRewards);
   const [walletError, setWalletError] = useState<string>();
+  // Live Sepolia TOM balance from the teacher's deployed MeadowFarm contract.
+  const [onchain, setOnchain] = useState<OnchainTomState>();
+  const [onchainBusy, setOnchainBusy] = useState(false);
+  const [onchainError, setOnchainError] = useState<string>();
   // Stage-completion banner shown in the HUD, even when the panel is closed.
   const [notice, setNotice] = useState<string>();
   // null until the first render, so loading a finished stage stays quiet.
@@ -248,6 +258,42 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide, onOpen }) => {
     setWalletError(undefined);
   };
 
+  // Read the Sepolia TOM balance straight from the teacher's contract.
+  useEffect(() => {
+    if (!walletAddress) {
+      setOnchain(undefined);
+      return;
+    }
+
+    let cancelled = false;
+    readOnchainTom(walletAddress as `0x${string}`)
+      .then((state) => {
+        if (!cancelled) setOnchain(state);
+      })
+      .catch(() => {
+        if (!cancelled) setOnchain(undefined);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [walletAddress]);
+
+  const handleClaimTom = async () => {
+    if (!walletAddress) return;
+
+    setOnchainBusy(true);
+    setOnchainError(undefined);
+    try {
+      await claimOnchainFaucet(walletAddress as `0x${string}`);
+      setOnchain(await readOnchainTom(walletAddress as `0x${string}`));
+    } catch {
+      setOnchainError(t("farmTasks.onchain.error"));
+    } finally {
+      setOnchainBusy(false);
+    }
+  };
+
   return (
     <>
       {notice && (
@@ -335,6 +381,42 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide, onOpen }) => {
             </div>
             {walletError && (
               <p className="text-xxs text-red-500 mb-1">{walletError}</p>
+            )}
+
+            {walletAddress && (
+              <div className="mb-1">
+                <div className="flex items-center justify-between">
+                  <span className="text-xxs">
+                    {t("farmTasks.onchain.balance", {
+                      amount: onchain?.balance ?? "…",
+                    })}
+                  </span>
+                  <a
+                    className="text-xxs underline"
+                    href={`${MEADOW_CHAIN.explorer}/address/${walletAddress}`}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    {t("farmTasks.onchain.view")}
+                  </a>
+                </div>
+                {onchain && !onchain.faucetClaimed && (
+                  <Button
+                    className="w-full mt-1"
+                    onClick={handleClaimTom}
+                    disabled={onchainBusy}
+                  >
+                    {onchainBusy
+                      ? t("farmTasks.onchain.claiming")
+                      : t("farmTasks.onchain.claim", {
+                          amount: MEADOW_CHAIN.faucetAmount,
+                        })}
+                  </Button>
+                )}
+                {onchainError && (
+                  <p className="text-xxs text-red-500 mt-1">{onchainError}</p>
+                )}
+              </div>
             )}
 
             <Switch
