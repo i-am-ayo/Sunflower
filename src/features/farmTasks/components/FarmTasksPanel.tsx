@@ -76,9 +76,10 @@ const formatCountdown = (milliseconds: number): string => {
 interface Props {
   show: boolean;
   onHide: () => void;
+  onOpen?: () => void;
 }
 
-export const FarmTasksPanel: React.FC<Props> = ({ show, onHide }) => {
+export const FarmTasksPanel: React.FC<Props> = ({ show, onHide, onOpen }) => {
   const { gameService } = useContext(Context);
   const { t } = useAppTranslation();
 
@@ -95,6 +96,11 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide }) => {
   );
   const [rewards, setRewards] = useState<WalletRewards>(loadWalletRewards);
   const [walletError, setWalletError] = useState<string>();
+  // Stage-completion banner shown in the HUD, even when the panel is closed.
+  const [notice, setNotice] = useState<string>();
+  // null until the first render, so loading a finished stage stays quiet.
+  const wasComplete = useRef<boolean | null>(null);
+  const wasAllDone = useRef<boolean | null>(null);
   // Rewards already paid to the connected wallet (stars + claimed stages).
   const creditedStars = useRef(taskState.stars);
   const creditedClaimed = useRef(taskState.claimed);
@@ -171,6 +177,54 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide }) => {
   const expired = isAttemptExpired(taskState, now);
   const allDone = isAllStagesClaimed(taskState);
 
+  // Tell the player the moment a stage finishes, panel open or not.
+  useEffect(() => {
+    if (wasComplete.current === null) {
+      wasComplete.current = complete;
+      return;
+    }
+
+    if (complete && !wasComplete.current && stage) {
+      setNotice(
+        t(
+          taskState.autoPlay
+            ? "farmTasks.notify.credited"
+            : "farmTasks.notify.claim",
+          {
+            stage: stage.stage,
+            coins: stage.coinReward,
+            stars: stage.reward,
+          },
+        ),
+      );
+    }
+
+    wasComplete.current = complete;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [complete, stage, taskState.autoPlay]);
+
+  useEffect(() => {
+    if (wasAllDone.current === null) {
+      wasAllDone.current = allDone;
+      return;
+    }
+
+    if (allDone && !wasAllDone.current) {
+      setNotice(t("farmTasks.notify.allDone"));
+    }
+
+    wasAllDone.current = allDone;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allDone]);
+
+  // Auto-hide the banner.
+  useEffect(() => {
+    if (!notice) return;
+
+    const timeout = window.setTimeout(() => setNotice(undefined), 6000);
+    return () => window.clearTimeout(timeout);
+  }, [notice]);
+
   const handleStart = () => update(startStage(taskState, now, farmActivity));
   const handleClaim = () => update(claimStage(taskState, farmActivity, now));
 
@@ -195,171 +249,194 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide }) => {
   };
 
   return (
-    <Modal show={show} onHide={onHide}>
-      <Panel>
-        <div className="relative p-2 w-full max-w-[350px]">
-          <img
-            src={SUNNYSIDE.icons.close}
-            className="absolute cursor-pointer z-10"
-            style={{
-              top: `${PIXEL_SCALE * 2}px`,
-              right: `${PIXEL_SCALE * 2}px`,
-              width: `${PIXEL_SCALE * 8}px`,
-            }}
-            onClick={onHide}
-          />
-
-          <div className="flex items-center space-x-1 mb-1">
-            <Label type="default">{t("farmTasks.title")}</Label>
-            <div className="flex items-center space-x-1 ml-1">
-              <img src={trophyIcon} className="w-4" />
-              <span className="text-xs">{taskState.stars}</span>
+    <>
+      {notice && (
+        <div
+          className="fixed left-4 bottom-24 z-[100] max-w-[320px] cursor-pointer"
+          onClick={() => {
+            onOpen?.();
+            setNotice(undefined);
+          }}
+        >
+          <Panel>
+            <div className="flex items-center space-x-2 p-2">
+              <img src={trophyIcon} className="w-5" />
+              <p className="text-xs">{notice}</p>
             </div>
-          </div>
+          </Panel>
+        </div>
+      )}
 
-          <p className="text-xxs mb-2">{t("farmTasks.subtitle")}</p>
+      <Modal show={show} onHide={onHide}>
+        <Panel>
+          <div className="relative p-2 w-full max-w-[350px]">
+            <img
+              src={SUNNYSIDE.icons.close}
+              className="absolute cursor-pointer z-10"
+              style={{
+                top: `${PIXEL_SCALE * 2}px`,
+                right: `${PIXEL_SCALE * 2}px`,
+                width: `${PIXEL_SCALE * 8}px`,
+              }}
+              onClick={onHide}
+            />
 
-          <div className="flex items-center justify-between mb-1">
-            <div className="flex items-center space-x-1 min-w-0">
-              <img src={metamaskIcon} className="w-4" />
-              {walletAddress ? (
-                <span className="text-xxs truncate">
-                  {t("farmTasks.wallet.connected", {
-                    address: shortenAddress(walletAddress),
-                  })}
-                </span>
-              ) : (
-                <span className="text-xxs opacity-70">
-                  {t("farmTasks.wallet.connectHint")}
-                </span>
-              )}
-            </div>
-
-            {walletAddress ? (
-              <div className="flex items-center space-x-1">
-                <img src={SUNNYSIDE.icons.coins} className="w-4" />
-                <span className="text-xs">
-                  {rewards[walletAddress]?.coins ?? 0}
-                </span>
+            <div className="flex items-center space-x-1 mb-1">
+              <Label type="default">{t("farmTasks.title")}</Label>
+              <div className="flex items-center space-x-1 ml-1">
                 <img src={trophyIcon} className="w-4" />
-                <span className="text-xs">
-                  {rewards[walletAddress]?.stars ?? 0}
-                </span>
+                <span className="text-xs">{taskState.stars}</span>
+              </div>
+            </div>
+
+            <p className="text-xxs mb-2">{t("farmTasks.subtitle")}</p>
+
+            <div className="flex items-center justify-between mb-1">
+              <div className="flex items-center space-x-1 min-w-0">
+                <img src={metamaskIcon} className="w-4" />
+                {walletAddress ? (
+                  <span className="text-xxs truncate">
+                    {t("farmTasks.wallet.connected", {
+                      address: shortenAddress(walletAddress),
+                    })}
+                  </span>
+                ) : (
+                  <span className="text-xxs opacity-70">
+                    {t("farmTasks.wallet.connectHint")}
+                  </span>
+                )}
+              </div>
+
+              {walletAddress ? (
+                <div className="flex items-center space-x-1">
+                  <img src={SUNNYSIDE.icons.coins} className="w-4" />
+                  <span className="text-xs">
+                    {rewards[walletAddress]?.coins ?? 0}
+                  </span>
+                  <img src={trophyIcon} className="w-4" />
+                  <span className="text-xs">
+                    {rewards[walletAddress]?.stars ?? 0}
+                  </span>
+                  <span
+                    className="text-xxs underline cursor-pointer"
+                    onClick={handleDisconnect}
+                  >
+                    {t("farmTasks.wallet.disconnect")}
+                  </span>
+                </div>
+              ) : (
                 <span
                   className="text-xxs underline cursor-pointer"
-                  onClick={handleDisconnect}
+                  onClick={handleConnect}
                 >
-                  {t("farmTasks.wallet.disconnect")}
+                  {t("farmTasks.wallet.connect")}
                 </span>
-              </div>
-            ) : (
-              <span
-                className="text-xxs underline cursor-pointer"
-                onClick={handleConnect}
-              >
-                {t("farmTasks.wallet.connect")}
-              </span>
+              )}
+            </div>
+            {walletError && (
+              <p className="text-xxs text-red-500 mb-1">{walletError}</p>
             )}
-          </div>
-          {walletError && (
-            <p className="text-xxs text-red-500 mb-1">{walletError}</p>
-          )}
 
-          <Switch
-            checked={taskState.autoPlay}
-            onChange={() => update(setAutoPlay(taskState, !taskState.autoPlay))}
-            label={t("farmTasks.autoPlay")}
-          />
-          <p className="text-xxs opacity-70 mb-2">
-            {t("farmTasks.autoPlayHint")}
-          </p>
+            <Switch
+              checked={taskState.autoPlay}
+              onChange={() =>
+                update(setAutoPlay(taskState, !taskState.autoPlay))
+              }
+              label={t("farmTasks.autoPlay")}
+            />
+            <p className="text-xxs opacity-70 mb-2">
+              {t("farmTasks.autoPlayHint")}
+            </p>
 
-          {allDone ? (
-            <p className="text-xs text-center py-3">{t("farmTasks.allDone")}</p>
-          ) : (
-            <>
-              <div className="flex flex-col space-y-0.5 mb-2">
-                {FARM_TASK_STAGES.map((entry) => {
-                  const claimed = taskState.claimed.includes(entry.stage);
-                  const isCurrent = entry.stage === taskState.stage;
+            {allDone ? (
+              <p className="text-xs text-center py-3">
+                {t("farmTasks.allDone")}
+              </p>
+            ) : (
+              <>
+                <div className="flex flex-col space-y-0.5 mb-2">
+                  {FARM_TASK_STAGES.map((entry) => {
+                    const claimed = taskState.claimed.includes(entry.stage);
+                    const isCurrent = entry.stage === taskState.stage;
 
-                  return (
-                    <div
-                      key={entry.stage}
-                      className="flex items-center justify-between text-xs"
-                    >
-                      <span>{`${entry.stage}. ${t(entry.nameKey)}`}</span>
-                      {claimed ? (
-                        <Label type="success">{t("farmTasks.claimed")}</Label>
-                      ) : isCurrent ? (
-                        <Label type="warning">{t("farmTasks.current")}</Label>
-                      ) : (
-                        <Label type="default">{t("farmTasks.locked")}</Label>
+                    return (
+                      <div
+                        key={entry.stage}
+                        className="flex items-center justify-between text-xs"
+                      >
+                        <span>{`${entry.stage}. ${t(entry.nameKey)}`}</span>
+                        {claimed ? (
+                          <Label type="success">{t("farmTasks.claimed")}</Label>
+                        ) : isCurrent ? (
+                          <Label type="warning">{t("farmTasks.current")}</Label>
+                        ) : (
+                          <Label type="default">{t("farmTasks.locked")}</Label>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {stage && (
+                  <div className="mb-2">
+                    {(attempt
+                      ? goals
+                      : stage.goals.map((goal) => ({ ...goal, current: 0 }))
+                    ).map((goal) => (
+                      <div key={goal.kind + goal.target} className="mb-1">
+                        <div className="flex justify-between items-center text-xs mb-0.5">
+                          <span>
+                            {t(GOAL_KEYS[goal.kind], { amount: goal.target })}
+                          </span>
+                          <span>{`${goal.current}/${goal.target}`}</span>
+                        </div>
+                        <ResizableBar
+                          percentage={(goal.current / goal.target) * 100}
+                          type="progress"
+                          outerDimensions={{ width: 60, height: 7 }}
+                        />
+                      </div>
+                    ))}
+
+                    <div className="flex items-center justify-between mt-2">
+                      <div className="flex items-center space-x-1">
+                        <img src={trophyIcon} className="w-4" />
+                        <span className="text-xs">{stage.reward}</span>
+                      </div>
+
+                      {attempt && !expired && !complete && (
+                        <Label type="info">
+                          {formatCountdown(attempt.endsAt - now)}
+                        </Label>
+                      )}
+                      {attempt && expired && (
+                        <Label type="danger">{t("farmTasks.expired")}</Label>
+                      )}
+                      {attempt && complete && (
+                        <Label type="success">{t("farmTasks.completed")}</Label>
                       )}
                     </div>
-                  );
-                })}
-              </div>
 
-              {stage && (
-                <div className="mb-2">
-                  {(attempt
-                    ? goals
-                    : stage.goals.map((goal) => ({ ...goal, current: 0 }))
-                  ).map((goal) => (
-                    <div key={goal.kind + goal.target} className="mb-1">
-                      <div className="flex justify-between items-center text-xs mb-0.5">
-                        <span>
-                          {t(GOAL_KEYS[goal.kind], { amount: goal.target })}
-                        </span>
-                        <span>{`${goal.current}/${goal.target}`}</span>
-                      </div>
-                      <ResizableBar
-                        percentage={(goal.current / goal.target) * 100}
-                        type="progress"
-                        outerDimensions={{ width: 60, height: 7 }}
-                      />
-                    </div>
-                  ))}
-
-                  <div className="flex items-center justify-between mt-2">
-                    <div className="flex items-center space-x-1">
-                      <img src={trophyIcon} className="w-4" />
-                      <span className="text-xs">{stage.reward}</span>
-                    </div>
-
-                    {attempt && !expired && !complete && (
-                      <Label type="info">
-                        {formatCountdown(attempt.endsAt - now)}
-                      </Label>
+                    {(!attempt || expired) && (
+                      <Button className="mt-2" onClick={handleStart}>
+                        {attempt ? t("farmTasks.retry") : t("farmTasks.start")}
+                      </Button>
                     )}
-                    {attempt && expired && (
-                      <Label type="danger">{t("farmTasks.expired")}</Label>
-                    )}
+
                     {attempt && complete && (
-                      <Label type="success">{t("farmTasks.completed")}</Label>
+                      <Button className="mt-2" onClick={handleClaim}>
+                        {t("farmTasks.claim")}
+                      </Button>
                     )}
                   </div>
+                )}
+              </>
+            )}
 
-                  {(!attempt || expired) && (
-                    <Button className="mt-2" onClick={handleStart}>
-                      {attempt ? t("farmTasks.retry") : t("farmTasks.start")}
-                    </Button>
-                  )}
-
-                  {attempt && complete && (
-                    <Button className="mt-2" onClick={handleClaim}>
-                      {t("farmTasks.claim")}
-                    </Button>
-                  )}
-                </div>
-              )}
-            </>
-          )}
-
-          <p className="text-xxs opacity-70">{t("farmTasks.localNote")}</p>
-        </div>
-      </Panel>
-    </Modal>
+            <p className="text-xxs opacity-70">{t("farmTasks.localNote")}</p>
+          </div>
+        </Panel>
+      </Modal>
+    </>
   );
 };

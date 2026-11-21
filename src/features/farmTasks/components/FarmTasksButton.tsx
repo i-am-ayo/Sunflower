@@ -20,7 +20,11 @@ export const FarmTasksButton: React.FC = () => {
           }}
         />
       </RoundButton>
-      <FarmTasksPanel show={showTasks} onHide={() => setShowTasks(false)} />
+      <FarmTasksPanel
+        show={showTasks}
+        onHide={() => setShowTasks(false)}
+        onOpen={() => setShowTasks(true)}
+      />
     </>
   );
 };
