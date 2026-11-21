@@ -1,5 +1,3 @@
-import { describe, expect, it } from "vitest";
-
 import type { FarmActivityCounters } from "./rules";
 import {
   applyAutoPlay,

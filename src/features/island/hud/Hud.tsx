@@ -22,6 +22,7 @@ import { useSound } from "lib/utils/hooks/useSound";
 import { TransactionCountdown } from "./Transaction";
 import { MarketplaceButton } from "./components/MarketplaceButton";
 import { FarmTasksButton } from "features/farmTasks/components/FarmTasksButton";
+import { FarmTasksSync } from "features/farmTasks/components/FarmTasksSync";
 import { AutoFarmButton } from "features/farmTasks/components/AutoFarmButton";
 import { PlayerNameGate } from "features/farmTasks/components/PlayerNameGate";
 import { MetaMaskButton } from "features/farmTasks/components/MetaMaskButton";
@@ -119,6 +120,7 @@ const HudComponent: React.FC<{
         {hasPowerSkills && <PowerSkillsButton />}
         <MarketplaceButton />
         <FarmTasksButton />
+        <FarmTasksSync />
         <AutoFarmButton />
         <PlayerNameGate />
         <MetaMaskButton />

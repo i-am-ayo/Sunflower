@@ -33,7 +33,7 @@ import {
   type FarmTaskState,
 } from "../lib/rules";
 import {
-  getTaskStorageKey,
+  getActiveTaskStorageKey,
   loadTaskState,
   saveTaskState,
 } from "../lib/storage";
@@ -45,7 +45,6 @@ import {
   readOnchainRewards,
   type OnchainRewardState,
 } from "../lib/onchain";
-import { CONFIG } from "lib/config";
 import {
   connectMetaMask,
   creditWalletReward,
@@ -95,7 +94,7 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide, onOpen }) => {
   const farmActivity = useSelector(gameService, _farmActivity);
   const username = useSelector(gameService, _username);
 
-  const storageKey = getTaskStorageKey(username);
+  const storageKey = getActiveTaskStorageKey(username);
   const [taskState, setTaskState] = useState<FarmTaskState>(
     () => loadTaskState(storageKey, Date.now()) ?? createTaskState(Date.now()),
   );
@@ -115,7 +114,6 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide, onOpen }) => {
   const wasComplete = useRef<boolean | null>(null);
   const wasAllDone = useRef<boolean | null>(null);
   const wasExpired = useRef<boolean | null>(null);
-  const lastAttempt = useRef<string | undefined>(undefined);
   // Rewards already paid to the connected wallet (stars + claimed stages).
   const creditedStars = useRef(taskState.stars);
   const creditedClaimed = useRef(taskState.claimed);
@@ -154,25 +152,8 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide, onOpen }) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [taskState, farmActivity, now]);
 
-  // The delivery board renews once a day on the live game. Offline (class demo)
-  // it is renewed locally whenever a stage starts, so each stage gets a fresh
-  // set of deliveries.
-  useEffect(() => {
-    const attempt = taskState.attempt;
-    const key = attempt ? `${attempt.stage}:${attempt.startedAt}` : undefined;
-
-    if (
-      key &&
-      key !== lastAttempt.current &&
-      !CONFIG.API_URL &&
-      gameService.getSnapshot().matches("playing")
-    ) {
-      gameService.send("tasks.refillDeliveries");
-    }
-
-    lastAttempt.current = key;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [taskState.attempt, gameService]);
+  // Delivery renewal and offline autosave live in `FarmTasksSync` (rendered by
+  // the HUD), so they keep working while this panel is closed.
 
   // The HUD button can also connect/disconnect the wallet.
   useEffect(() => {
@@ -431,7 +412,7 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide, onOpen }) => {
 
               {walletAddress ? (
                 <div className="flex items-center space-x-1">
-                  <img src={SUNNYSIDE.icons.coins} className="w-4" />
+                  <img src={SUNNYSIDE.ui.coins} className="w-4" />
                   <span className="text-xs">
                     {rewards[walletAddress]?.coins ?? 0}
                   </span>

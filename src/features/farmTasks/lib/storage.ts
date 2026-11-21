@@ -1,3 +1,5 @@
+import { CONFIG } from "lib/config";
+
 import type { FarmTaskState } from "./rules";
 import { normalizeTaskState } from "./rules";
 
@@ -5,6 +7,14 @@ const KEY_PREFIX = "farmTasks:v1";
 
 export const getTaskStorageKey = (farmId: string | undefined): string =>
   `${KEY_PREFIX}:${farmId ?? "local"}`;
+
+/**
+ * Offline the farm has no stable id (its `username` is regenerated on every
+ * load), so a per-load key would restart the stages on every refresh. Use one
+ * shared local key instead; with an API the farm id is stable.
+ */
+export const getActiveTaskStorageKey = (farmId?: string): string =>
+  getTaskStorageKey(CONFIG.API_URL ? farmId : undefined);
 
 const isTaskState = (value: unknown): value is FarmTaskState => {
   const state = value as FarmTaskState;

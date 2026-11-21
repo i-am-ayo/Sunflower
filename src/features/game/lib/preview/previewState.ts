@@ -9,6 +9,7 @@ import { OFFLINE_FARM } from "../landData";
 import { getDynamicIsland } from "../landDataDynamic";
 import { STATIC_OFFLINE_FARM } from "../landDataStatic";
 import { loadActivitySnapshot } from "features/farmTasks/lib/activity";
+import { loadFarm } from "features/farmTasks/lib/persistFarm";
 import {
   type PreviewParams,
   applyPatch,
@@ -116,6 +117,12 @@ export function getPreviewFarm({
         `unknown fixture "${params.fixture}" (known: ${PREVIEW_FIXTURE_NAMES.join(", ")})`,
       );
     }
+  }
+
+  // Offline demo autosave: continue from where the player left off (coins,
+  // planted crops, inventory, counters). Other preview fixtures still win.
+  if (!params.fixture || params.fixture === "default") {
+    farm = loadFarm(farm);
   }
 
   if (params.patch) {
