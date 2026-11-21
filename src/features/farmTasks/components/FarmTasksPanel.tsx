@@ -41,9 +41,11 @@ import {
   REWARDS_ADDRESS,
   REWARDS_EXPLORER,
   claimOnchainRewards,
+  isAlreadyClaimedError,
   readOnchainRewards,
   type OnchainRewardState,
 } from "../lib/onchain";
+import { saveActivitySnapshot } from "../lib/activity";
 import {
   connectMetaMask,
   creditWalletReward,
@@ -112,6 +114,7 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide, onOpen }) => {
   // null until the first render, so loading a finished stage stays quiet.
   const wasComplete = useRef<boolean | null>(null);
   const wasAllDone = useRef<boolean | null>(null);
+  const wasExpired = useRef<boolean | null>(null);
   // Rewards already paid to the connected wallet (stars + claimed stages).
   const creditedStars = useRef(taskState.stars);
   const creditedClaimed = useRef(taskState.claimed);
@@ -149,6 +152,12 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide, onOpen }) => {
     if (next !== taskState) update(next);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [taskState, farmActivity, now]);
+
+  // Keep today's counters so the stage progress survives a page reload.
+  useEffect(() => {
+    if (!farmActivity) return;
+    saveActivitySnapshot(farmActivity as Record<string, number>);
+  }, [farmActivity]);
 
   // The HUD button can also connect/disconnect the wallet.
   useEffect(() => {
@@ -247,6 +256,23 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide, onOpen }) => {
     return () => window.clearTimeout(timeout);
   }, [notice]);
 
+  // Warn when a stage's timer runs out (auto-play then restarts it silently).
+  useEffect(() => {
+    const attemptStage = taskState.attempt?.stage;
+
+    if (wasExpired.current === null) {
+      wasExpired.current = expired;
+      return;
+    }
+
+    if (expired && !wasExpired.current && attemptStage) {
+      setNotice(t("farmTasks.notify.expired", { stage: attemptStage }));
+    }
+
+    wasExpired.current = expired;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expired, taskState.attempt?.stage]);
+
   const handleStart = () => update(startStage(taskState, now, farmActivity));
   const handleClaim = () => update(claimStage(taskState, farmActivity, now));
 
@@ -294,19 +320,36 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide, onOpen }) => {
   const handlePayOnchain = async () => {
     if (!walletAddress || !payoutMask) return;
 
+    const payingMask = payoutMask;
+
     setOnchainBusy(true);
     setOnchainError(undefined);
     try {
       await claimOnchainRewards(
         walletAddress as `0x${string}`,
         taskDay,
-        payoutMask,
+        payingMask,
       );
+      // Record the transfer immediately: the RPC read below can briefly return
+      // the pre-claim mask, which used to leave the button enabled and let a
+      // second click revert with AlreadyClaimed().
+      setOnchain((prev) => ({
+        balance: prev?.balance ?? "0",
+        claimedMask: (prev?.claimedMask ?? 0) | payingMask,
+      }));
       setOnchain(
         await readOnchainRewards(walletAddress as `0x${string}`, taskDay),
       );
-    } catch {
-      setOnchainError(t("farmTasks.onchain.error"));
+    } catch (error) {
+      if (isAlreadyClaimedError(error)) {
+        setOnchain((prev) => ({
+          balance: prev?.balance ?? "0",
+          claimedMask: (prev?.claimedMask ?? 0) | payingMask,
+        }));
+        setOnchainError(t("farmTasks.onchain.already"));
+      } else {
+        setOnchainError(t("farmTasks.onchain.error"));
+      }
     } finally {
       setOnchainBusy(false);
     }

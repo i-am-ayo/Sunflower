@@ -55,6 +55,26 @@ const getWalletClient = () => {
   return createWalletClient({ chain: sepolia, transport: custom(ethereum) });
 };
 
+/** True when the contract reverted with its AlreadyClaimed() custom error. */
+export const isAlreadyClaimedError = (error: unknown): boolean => {
+  const collect = (value: unknown, depth = 0): string => {
+    if (!value || depth > 5) return "";
+    const entry = value as {
+      data?: unknown;
+      message?: unknown;
+      cause?: unknown;
+    };
+
+    return [
+      typeof entry.data === "string" ? entry.data : "",
+      typeof entry.message === "string" ? entry.message : "",
+      collect(entry.cause, depth + 1),
+    ].join(" ");
+  };
+
+  return collect(error).toLowerCase().includes("646cf558");
+};
+
 export const readOnchainRewards = async (
   address: Address,
   day: string,

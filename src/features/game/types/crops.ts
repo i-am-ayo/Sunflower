@@ -576,3 +576,18 @@ export const isOvernightCrop = (cropName: CropName | GreenHouseCropName) => {
     details.harvestSeconds <= 36 * 60 * 60
   );
 };
+
+/**
+ * Class-demo pacing: crops grow at 10% of their normal time (9 minutes -> ~54
+ * seconds), so a presentation can show a full plant/harvest loop. Applied once
+ * at module load, before any consumer reads the table, so planting, harvesting
+ * checks and UI timers all stay in sync. Remove this block to restore the
+ * original game pacing.
+ */
+const DEMO_GROWTH_SCALE = 0.1;
+Object.values(CROPS).forEach((crop) => {
+  crop.harvestSeconds = Math.max(
+    5,
+    Math.round(crop.harvestSeconds * DEMO_GROWTH_SCALE),
+  );
+});

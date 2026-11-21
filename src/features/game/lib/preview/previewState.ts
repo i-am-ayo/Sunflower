@@ -8,6 +8,7 @@ import { INITIAL_FARM, TEST_FARM } from "../constants";
 import { OFFLINE_FARM } from "../landData";
 import { getDynamicIsland } from "../landDataDynamic";
 import { STATIC_OFFLINE_FARM } from "../landDataStatic";
+import { loadActivitySnapshot } from "features/farmTasks/lib/activity";
 import {
   type PreviewParams,
   applyPatch,
@@ -152,6 +153,19 @@ export function getPreviewFarm({
     if (!farm.username) {
       farm = { ...farm, username: PREVIEW_USERNAME };
     }
+  }
+
+  // Restore today's Farm Tasks counters: the offline farm itself is rebuilt on
+  // every load, so without this the staged challenge would appear reset.
+  const savedActivity = loadActivitySnapshot(now);
+  if (savedActivity) {
+    farm = {
+      ...farm,
+      farmActivity: {
+        ...farm.farmActivity,
+        ...(savedActivity as Partial<GameState["farmActivity"]>),
+      },
+    };
   }
 
   return farm;

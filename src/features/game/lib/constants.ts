@@ -295,12 +295,14 @@ export const GENESIS_LAND_EXPANSION: ExpansionConstruction = {
   readyAt: 0,
 };
 
-export const TREE_RECOVERY_TIME = 2 * 60 * 60;
-export const STONE_RECOVERY_TIME = 4 * 60 * 60;
-export const IRON_RECOVERY_TIME = 8 * 60 * 60;
-export const GOLD_RECOVERY_TIME = 24 * 60 * 60;
-export const CRIMSTONE_RECOVERY_TIME = 24 * 60 * 60;
-export const SUNSTONE_RECOVERY_TIME = 3 * 24 * 60 * 60;
+// Class-demo pacing: resource recovery is compressed so a presentation can
+// show a chop -> regrow loop (tree 2h -> 3m, stone 4h -> 4m, etc.).
+export const TREE_RECOVERY_TIME = 3 * 60;
+export const STONE_RECOVERY_TIME = 4 * 60;
+export const IRON_RECOVERY_TIME = 5 * 60;
+export const GOLD_RECOVERY_TIME = 8 * 60;
+export const CRIMSTONE_RECOVERY_TIME = 10 * 60;
+export const SUNSTONE_RECOVERY_TIME = 15 * 60;
 
 export const INITIAL_RESOURCES: Pick<
   GameState,
