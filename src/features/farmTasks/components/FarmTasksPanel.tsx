@@ -95,8 +95,9 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide }) => {
   );
   const [rewards, setRewards] = useState<WalletRewards>(loadWalletRewards);
   const [walletError, setWalletError] = useState<string>();
-  // Stars already paid to the connected wallet, so only new claims are credited.
+  // Rewards already paid to the connected wallet (stars + claimed stages).
   const creditedStars = useRef(taskState.stars);
+  const creditedClaimed = useRef(taskState.claimed);
 
   const now = useNow({
     live: show || taskState.autoPlay,
@@ -141,14 +142,27 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide }) => {
     return () => window.removeEventListener(WALLET_CHANGE_EVENT, sync);
   }, []);
 
-  // Pay stars earned since the last claim into the connected wallet.
+  // Pay newly claimed rewards (stars + coins) into the connected wallet.
   useEffect(() => {
-    const delta = taskState.stars - creditedStars.current;
-    creditedStars.current = taskState.stars;
-    if (delta <= 0 || !walletAddress) return;
+    const newClaims = taskState.claimed.filter(
+      (stage) => !creditedClaimed.current.includes(stage),
+    );
+    const starDelta = taskState.stars - creditedStars.current;
 
-    setRewards(creditWalletReward(walletAddress, delta));
-  }, [taskState.stars, walletAddress]);
+    creditedClaimed.current = taskState.claimed;
+    creditedStars.current = taskState.stars;
+
+    if (!walletAddress || (newClaims.length === 0 && starDelta <= 0)) return;
+
+    const coins = newClaims.reduce(
+      (total, stage) => total + (FARM_TASK_STAGES[stage - 1]?.coinReward ?? 0),
+      0,
+    );
+
+    setRewards(
+      creditWalletReward(walletAddress, Math.max(0, starDelta), coins),
+    );
+  }, [taskState.claimed, taskState.stars, walletAddress]);
 
   const stage = FARM_TASK_STAGES[taskState.stage - 1];
   const attempt = taskState.attempt;
@@ -223,8 +237,14 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide }) => {
 
             {walletAddress ? (
               <div className="flex items-center space-x-1">
+                <img src={SUNNYSIDE.icons.coins} className="w-4" />
+                <span className="text-xs">
+                  {rewards[walletAddress]?.coins ?? 0}
+                </span>
                 <img src={trophyIcon} className="w-4" />
-                <span className="text-xs">{rewards[walletAddress] ?? 0}</span>
+                <span className="text-xs">
+                  {rewards[walletAddress]?.stars ?? 0}
+                </span>
                 <span
                   className="text-xxs underline cursor-pointer"
                   onClick={handleDisconnect}

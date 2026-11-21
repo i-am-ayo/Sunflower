@@ -14,7 +14,12 @@ const REWARDS_KEY = "farmTasks:wallet:rewards:v1";
 /** Fired on `window` whenever the connected address changes. */
 export const WALLET_CHANGE_EVENT = "farmTasks:wallet-changed";
 
-export type WalletRewards = Record<string, number>;
+export interface WalletBalance {
+  stars: number;
+  coins: number;
+}
+
+export type WalletRewards = Record<string, WalletBalance>;
 
 interface EthereumProvider {
   isMetaMask?: boolean;
@@ -74,18 +79,41 @@ export const connectMetaMask = async (): Promise<string> => {
   return address;
 };
 
-export const loadWalletRewards = (): WalletRewards =>
-  readLocalStorageJSON<WalletRewards>(REWARDS_KEY) ?? {};
+/**
+ * Loads the per-address reward ledger. Older saves stored a plain star count,
+ * so normalise those to `{ stars, coins: 0 }`.
+ */
+export const loadWalletRewards = (): WalletRewards => {
+  const stored =
+    readLocalStorageJSON<Record<string, WalletBalance | number>>(REWARDS_KEY);
+  if (!stored) return {};
 
-/** Credits claimed Task Stars to a wallet address, returning the new ledger. */
+  return Object.entries(stored).reduce<WalletRewards>(
+    (acc, [address, value]) => {
+      acc[address] =
+        typeof value === "number"
+          ? { stars: value, coins: 0 }
+          : { stars: value?.stars ?? 0, coins: value?.coins ?? 0 };
+      return acc;
+    },
+    {},
+  );
+};
+
+/** Credits claimed Task Stars and coins to a wallet, returning the ledger. */
 export const creditWalletReward = (
   address: string,
   stars: number,
+  coins: number,
 ): WalletRewards => {
   const rewards = loadWalletRewards();
+  const current = rewards[address] ?? { stars: 0, coins: 0 };
   const next = {
     ...rewards,
-    [address]: (rewards[address] ?? 0) + stars,
+    [address]: {
+      stars: current.stars + stars,
+      coins: current.coins + coins,
+    },
   };
   writeLocalStorageJSON(REWARDS_KEY, next);
   return next;

@@ -9080,7 +9080,7 @@
   "farmTasks.title": "Farm Tasks",
   "farmTasks.subtitle": "Complete each stage before the timer runs out to earn Task Stars.",
   "farmTasks.wallet.connect": "Connect MetaMask",
-  "farmTasks.wallet.connectHint": "Connect MetaMask to receive stage rewards.",
+  "farmTasks.wallet.connectHint": "Connect MetaMask to receive stage rewards (coins + stars).",
   "farmTasks.wallet.connected": "Rewards to {{address}}",
   "farmTasks.wallet.disconnect": "Disconnect",
   "farmTasks.wallet.missing": "MetaMask not found. Install the browser extension.",

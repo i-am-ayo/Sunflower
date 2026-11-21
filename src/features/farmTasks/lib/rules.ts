@@ -22,6 +22,8 @@ export interface FarmTaskStage {
   nameKey: TranslationKeys;
   durationMs: number;
   reward: number;
+  /** Coins paid to the connected wallet when the stage is claimed. */
+  coinReward: number;
   goals: FarmTaskGoal[];
 }
 
@@ -46,16 +48,16 @@ export interface FarmTaskState {
 const MINUTE = 60_000;
 
 /**
- * Durations and targets are tuned for Sunflower's crop/cook timers, which are
- * much slower than MeadowFarm's. Keep them here so balance can be adjusted in
- * one place.
+ * Durations are short on purpose: the challenge is used for class demos, so a
+ * full run has to fit in a few minutes. Adjust here to rebalance.
  */
 export const FARM_TASK_STAGES: FarmTaskStage[] = [
   {
     stage: 1,
     nameKey: "farmTasks.stage.1",
-    durationMs: 15 * MINUTE,
+    durationMs: 2 * MINUTE,
     reward: 1,
+    coinReward: 25,
     goals: [
       { kind: "plant", target: 8 },
       { kind: "harvest", target: 8 },
@@ -64,8 +66,9 @@ export const FARM_TASK_STAGES: FarmTaskStage[] = [
   {
     stage: 2,
     nameKey: "farmTasks.stage.2",
-    durationMs: 20 * MINUTE,
+    durationMs: 3 * MINUTE,
     reward: 2,
+    coinReward: 50,
     goals: [
       { kind: "harvest", target: 20 },
       { kind: "cook", target: 4 },
@@ -74,8 +77,9 @@ export const FARM_TASK_STAGES: FarmTaskStage[] = [
   {
     stage: 3,
     nameKey: "farmTasks.stage.3",
-    durationMs: 20 * MINUTE,
+    durationMs: 3 * MINUTE,
     reward: 3,
+    coinReward: 75,
     goals: [
       { kind: "deliver", target: 2 },
       { kind: "harvest", target: 25 },
@@ -84,8 +88,9 @@ export const FARM_TASK_STAGES: FarmTaskStage[] = [
   {
     stage: 4,
     nameKey: "farmTasks.stage.4",
-    durationMs: 30 * MINUTE,
+    durationMs: 4 * MINUTE,
     reward: 5,
+    coinReward: 125,
     goals: [
       { kind: "cook", target: 10 },
       { kind: "deliver", target: 3 },
@@ -94,8 +99,9 @@ export const FARM_TASK_STAGES: FarmTaskStage[] = [
   {
     stage: 5,
     nameKey: "farmTasks.stage.5",
-    durationMs: 45 * MINUTE,
+    durationMs: 5 * MINUTE,
     reward: 8,
+    coinReward: 200,
     goals: [
       { kind: "harvest", target: 50 },
       { kind: "cook", target: 15 },
