@@ -9,6 +9,8 @@ import { SUNNYSIDE } from "assets/sunnyside";
 import type { MachineState } from "features/game/lib/gameMachine";
 import { RoundButton } from "components/ui/RoundButton";
 import classNames from "classnames";
+import { CONFIG } from "lib/config";
+import { saveActivitySnapshot } from "features/farmTasks/lib/activity";
 
 type ButtonState = "unsaved" | "inProgress" | "saved";
 
@@ -69,6 +71,13 @@ export const Save: React.FC = () => {
   }, [showSaved]);
 
   const save = () => {
+    // Offline demo: there is no server to autosave to, so persist the daily
+    // Farm Tasks counters locally when the player presses Save.
+    if (!CONFIG.API_URL) {
+      const { farmActivity } = gameService.getSnapshot().context.state;
+      saveActivitySnapshot(farmActivity as Record<string, number>);
+    }
+
     gameService.send("SAVE");
   };
 

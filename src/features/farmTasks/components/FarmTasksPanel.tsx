@@ -45,7 +45,6 @@ import {
   readOnchainRewards,
   type OnchainRewardState,
 } from "../lib/onchain";
-import { saveActivitySnapshot } from "../lib/activity";
 import {
   connectMetaMask,
   creditWalletReward,
@@ -152,12 +151,6 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide, onOpen }) => {
     if (next !== taskState) update(next);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [taskState, farmActivity, now]);
-
-  // Keep today's counters so the stage progress survives a page reload.
-  useEffect(() => {
-    if (!farmActivity) return;
-    saveActivitySnapshot(farmActivity as Record<string, number>);
-  }, [farmActivity]);
 
   // The HUD button can also connect/disconnect the wallet.
   useEffect(() => {
@@ -490,9 +483,23 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide, onOpen }) => {
             </p>
 
             {allDone ? (
-              <p className="text-xs text-center py-3">
-                {t("farmTasks.allDone")}
-              </p>
+              <div className="flex flex-col items-center py-3">
+                <p className="text-xs text-center mb-2">
+                  {t("farmTasks.allDone")}
+                </p>
+                <Button
+                  onClick={() => {
+                    // Start the next presentation from day one: drop every
+                    // Farm Tasks key (progress, claims, wallet ledger, name).
+                    Object.keys(localStorage)
+                      .filter((key) => key.startsWith("farmTasks:"))
+                      .forEach((key) => localStorage.removeItem(key));
+                    window.location.reload();
+                  }}
+                >
+                  {t("farmTasks.restart")}
+                </Button>
+              </div>
             ) : (
               <>
                 <div className="flex flex-col space-y-0.5 mb-2">
