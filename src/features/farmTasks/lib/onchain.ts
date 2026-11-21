@@ -11,32 +11,32 @@ import {
 import { sepolia } from "viem/chains";
 
 /**
- * The MeadowFarm Sepolia deployment that ships with the teacher's package.
- * Stage vouchers need his reward-signer key (not in the archive), but the
- * token balance and the one-off faucet are open to any wallet.
+ * Our own FarmTasks reward token (contracts/FarmRewards.sol), deployed by the
+ * player on Sepolia. Set `VITE_FARM_REWARDS_ADDRESS` to the deployed address.
  */
-export const MEADOW_CHAIN = {
-  game: "0x41370b425645c8552D04e19F8Ba003893225D57D" as Address,
-  tom: "0x74a9736006abE045E1cbaa7670E8bf2986Ea433a" as Address,
-  explorer: "https://sepolia.etherscan.io",
-  faucetAmount: 200,
-} as const;
+const configuredAddress = (
+  import.meta.env as Record<string, string | undefined>
+).VITE_FARM_REWARDS_ADDRESS;
 
-const GAME_ABI = parseAbi([
-  "function faucet()",
-  "function faucetClaimed(address) view returns (bool)",
-]);
+export const REWARDS_ADDRESS: Address | undefined =
+  configuredAddress && /^0x[0-9a-fA-F]{40}$/.test(configuredAddress)
+    ? (configuredAddress as Address)
+    : undefined;
 
-const TOKEN_ABI = parseAbi([
-  "function balanceOf(address) view returns (uint256)",
-  "function decimals() view returns (uint8)",
-]);
+export const REWARDS_EXPLORER = "https://sepolia.etherscan.io";
 
 const RPC_URL = "https://ethereum-sepolia-rpc.publicnode.com";
 
-export interface OnchainTomState {
+const REWARDS_ABI = parseAbi([
+  "function balanceOf(address) view returns (uint256)",
+  "function decimals() view returns (uint8)",
+  "function claimedMask(address, uint64) view returns (uint8)",
+  "function claimRewards(uint64 day, uint8 mask) returns (uint256)",
+]);
+
+export interface OnchainRewardState {
   balance: string;
-  faucetClaimed: boolean;
+  claimedMask: number;
 }
 
 const getPublicClient = () =>
@@ -46,47 +46,52 @@ const getWalletClient = () => {
   const ethereum = (window as { ethereum?: EIP1193Provider }).ethereum;
   if (!ethereum) throw new Error("No browser wallet found");
 
-  return createWalletClient({
-    chain: sepolia,
-    transport: custom(ethereum),
-  });
+  return createWalletClient({ chain: sepolia, transport: custom(ethereum) });
 };
 
-export const readOnchainTom = async (
+export const readOnchainRewards = async (
   address: Address,
-): Promise<OnchainTomState> => {
+  day: number,
+): Promise<OnchainRewardState> => {
+  if (!REWARDS_ADDRESS) throw new Error("Rewards contract not configured");
+
   const client = getPublicClient();
 
-  const [raw, decimals, faucetClaimed] = await Promise.all([
+  const [raw, decimals, claimedMask] = await Promise.all([
     client.readContract({
-      address: MEADOW_CHAIN.tom,
-      abi: TOKEN_ABI,
+      address: REWARDS_ADDRESS,
+      abi: REWARDS_ABI,
       functionName: "balanceOf",
       args: [address],
     }),
     client.readContract({
-      address: MEADOW_CHAIN.tom,
-      abi: TOKEN_ABI,
+      address: REWARDS_ADDRESS,
+      abi: REWARDS_ABI,
       functionName: "decimals",
     }),
     client.readContract({
-      address: MEADOW_CHAIN.game,
-      abi: GAME_ABI,
-      functionName: "faucetClaimed",
-      args: [address],
+      address: REWARDS_ADDRESS,
+      abi: REWARDS_ABI,
+      functionName: "claimedMask",
+      args: [address, BigInt(day)],
     }),
   ]);
 
   return {
     balance: formatUnits(raw, decimals),
-    faucetClaimed,
+    claimedMask: Number(claimedMask),
   };
 };
 
-/** Claims the one-off 200 test TOM faucet on Sepolia. */
-export const claimOnchainFaucet = async (address: Address) => {
+/** Pays the given stage mask (bit 0 = stage 1) to the player on Sepolia. */
+export const claimOnchainRewards = async (
+  address: Address,
+  day: number,
+  mask: number,
+): Promise<`0x${string}`> => {
+  if (!REWARDS_ADDRESS) throw new Error("Rewards contract not configured");
+
   const client = getWalletClient();
-  const account = address;
 
   try {
     await client.switchChain({ id: sepolia.id });
@@ -96,10 +101,11 @@ export const claimOnchainFaucet = async (address: Address) => {
   }
 
   return client.writeContract({
-    address: MEADOW_CHAIN.game,
-    abi: GAME_ABI,
-    functionName: "faucet",
-    account,
+    address: REWARDS_ADDRESS,
+    abi: REWARDS_ABI,
+    functionName: "claimRewards",
+    args: [BigInt(day), mask],
+    account: address,
     chain: sepolia,
   });
 };

@@ -38,10 +38,11 @@ import {
   saveTaskState,
 } from "../lib/storage";
 import {
-  MEADOW_CHAIN,
-  claimOnchainFaucet,
-  readOnchainTom,
-  type OnchainTomState,
+  REWARDS_ADDRESS,
+  REWARDS_EXPLORER,
+  claimOnchainRewards,
+  readOnchainRewards,
+  type OnchainRewardState,
 } from "../lib/onchain";
 import {
   connectMetaMask,
@@ -102,8 +103,8 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide, onOpen }) => {
   );
   const [rewards, setRewards] = useState<WalletRewards>(loadWalletRewards);
   const [walletError, setWalletError] = useState<string>();
-  // Live Sepolia TOM balance from the teacher's deployed MeadowFarm contract.
-  const [onchain, setOnchain] = useState<OnchainTomState>();
+  // Live Sepolia MTOM balance from our deployed FarmRewards contract.
+  const [onchain, setOnchain] = useState<OnchainRewardState>();
   const [onchainBusy, setOnchainBusy] = useState(false);
   const [onchainError, setOnchainError] = useState<string>();
   // Stage-completion banner shown in the HUD, even when the panel is closed.
@@ -120,6 +121,7 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide, onOpen }) => {
     intervalMs: 1000,
     autoEndAt: taskState.attempt?.endsAt,
   });
+  const taskDay = getTaskDay(now);
 
   const update = (next: FarmTaskState) => {
     setTaskState(next);
@@ -186,6 +188,16 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide, onOpen }) => {
   const complete = isAttemptComplete(taskState, farmActivity, now);
   const expired = isAttemptExpired(taskState, now);
   const allDone = isAllStagesClaimed(taskState);
+
+  // Stages claimed in-game that our Sepolia contract has not paid yet.
+  const claimedMask = taskState.claimed.reduce(
+    (mask, stage) => mask | (1 << (stage - 1)),
+    0,
+  );
+  const payoutMask = claimedMask & ~(onchain?.claimedMask ?? 0);
+  const payoutCoins = FARM_TASK_STAGES.filter(
+    (stage) => payoutMask & (1 << (stage.stage - 1)),
+  ).reduce((total, stage) => total + stage.coinReward, 0);
 
   // Tell the player the moment a stage finishes, panel open or not.
   useEffect(() => {
@@ -258,15 +270,15 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide, onOpen }) => {
     setWalletError(undefined);
   };
 
-  // Read the Sepolia TOM balance straight from the teacher's contract.
+  // Read the Sepolia MTOM balance straight from our deployed contract.
   useEffect(() => {
-    if (!walletAddress) {
+    if (!walletAddress || !REWARDS_ADDRESS) {
       setOnchain(undefined);
       return;
     }
 
     let cancelled = false;
-    readOnchainTom(walletAddress as `0x${string}`)
+    readOnchainRewards(walletAddress as `0x${string}`, taskDay)
       .then((state) => {
         if (!cancelled) setOnchain(state);
       })
@@ -277,16 +289,22 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide, onOpen }) => {
     return () => {
       cancelled = true;
     };
-  }, [walletAddress]);
+  }, [walletAddress, taskDay]);
 
-  const handleClaimTom = async () => {
-    if (!walletAddress) return;
+  const handlePayOnchain = async () => {
+    if (!walletAddress || !payoutMask) return;
 
     setOnchainBusy(true);
     setOnchainError(undefined);
     try {
-      await claimOnchainFaucet(walletAddress as `0x${string}`);
-      setOnchain(await readOnchainTom(walletAddress as `0x${string}`));
+      await claimOnchainRewards(
+        walletAddress as `0x${string}`,
+        taskDay,
+        payoutMask,
+      );
+      setOnchain(
+        await readOnchainRewards(walletAddress as `0x${string}`, taskDay),
+      );
     } catch {
       setOnchainError(t("farmTasks.onchain.error"));
     } finally {
@@ -383,7 +401,7 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide, onOpen }) => {
               <p className="text-xxs text-red-500 mb-1">{walletError}</p>
             )}
 
-            {walletAddress && (
+            {walletAddress && REWARDS_ADDRESS && (
               <div className="mb-1">
                 <div className="flex items-center justify-between">
                   <span className="text-xxs">
@@ -393,24 +411,22 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide, onOpen }) => {
                   </span>
                   <a
                     className="text-xxs underline"
-                    href={`${MEADOW_CHAIN.explorer}/address/${walletAddress}`}
+                    href={`${REWARDS_EXPLORER}/address/${walletAddress}`}
                     target="_blank"
                     rel="noreferrer"
                   >
                     {t("farmTasks.onchain.view")}
                   </a>
                 </div>
-                {onchain && !onchain.faucetClaimed && (
+                {payoutMask > 0 && (
                   <Button
                     className="w-full mt-1"
-                    onClick={handleClaimTom}
+                    onClick={handlePayOnchain}
                     disabled={onchainBusy}
                   >
                     {onchainBusy
                       ? t("farmTasks.onchain.claiming")
-                      : t("farmTasks.onchain.claim", {
-                          amount: MEADOW_CHAIN.faucetAmount,
-                        })}
+                      : t("farmTasks.onchain.claim", { amount: payoutCoins })}
                   </Button>
                 )}
                 {onchainError && (
