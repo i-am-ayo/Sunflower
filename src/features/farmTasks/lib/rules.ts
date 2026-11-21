@@ -81,7 +81,7 @@ export const FARM_TASK_STAGES: FarmTaskStage[] = [
     reward: 3,
     coinReward: 75,
     goals: [
-      { kind: "plant", target: 10 },
+      { kind: "deliver", target: 2 },
       { kind: "harvest", target: 25 },
     ],
   },
@@ -92,8 +92,8 @@ export const FARM_TASK_STAGES: FarmTaskStage[] = [
     reward: 5,
     coinReward: 125,
     goals: [
-      { kind: "cook", target: 10 },
-      { kind: "plant", target: 12 },
+      { kind: "deliver", target: 3 },
+      { kind: "cook", target: 8 },
     ],
   },
   {
@@ -103,7 +103,8 @@ export const FARM_TASK_STAGES: FarmTaskStage[] = [
     reward: 8,
     coinReward: 200,
     goals: [
-      { kind: "harvest", target: 40 },
+      { kind: "deliver", target: 3 },
+      { kind: "harvest", target: 25 },
       { kind: "cook", target: 8 },
     ],
   },

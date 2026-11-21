@@ -618,6 +618,10 @@ import {
   type CancelQueuedRecipeAction,
 } from "./landExpansion/cancelQueuedRecipe";
 import {
+  refillDeliveries,
+  type RefillDeliveriesAction,
+} from "./landExpansion/refillDeliveries";
+import {
   speedUpUpgrade,
   type SpeedUpUpgradeAction,
 } from "./landExpansion/speedUpUpgrade";
@@ -910,6 +914,7 @@ export type PlayingEvent =
   | OilGreenhouseAction
   | HarvestGreenhouseAction
   | PlantGreenhouseAction
+  | RefillDeliveriesAction
   | FertiliseGreenhouseAction
   | LandExpansionPlantAction
   | LandExpansionFertiliseCropAction
@@ -1206,6 +1211,7 @@ export const PLAYING_EVENTS: Handlers<PlayingEvent> = {
   "processing.spedUp": speedUpProcessing,
   "onChainAirdrop.acknowledged": acknowledgeOnChainAirdrop,
   "recipe.cancelled": cancelQueuedRecipe,
+  "tasks.refillDeliveries": refillDeliveries,
   "obsidian.exchanged": exchangeObsidian,
   "resource.bought": buyResource,
   "animal.sold": sellAnimal,

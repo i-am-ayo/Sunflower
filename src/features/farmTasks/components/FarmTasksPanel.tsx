@@ -45,6 +45,7 @@ import {
   readOnchainRewards,
   type OnchainRewardState,
 } from "../lib/onchain";
+import { CONFIG } from "lib/config";
 import {
   connectMetaMask,
   creditWalletReward,
@@ -114,6 +115,7 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide, onOpen }) => {
   const wasComplete = useRef<boolean | null>(null);
   const wasAllDone = useRef<boolean | null>(null);
   const wasExpired = useRef<boolean | null>(null);
+  const lastAttempt = useRef<string | undefined>(undefined);
   // Rewards already paid to the connected wallet (stars + claimed stages).
   const creditedStars = useRef(taskState.stars);
   const creditedClaimed = useRef(taskState.claimed);
@@ -151,6 +153,26 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide, onOpen }) => {
     if (next !== taskState) update(next);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [taskState, farmActivity, now]);
+
+  // The delivery board renews once a day on the live game. Offline (class demo)
+  // it is renewed locally whenever a stage starts, so each stage gets a fresh
+  // set of deliveries.
+  useEffect(() => {
+    const attempt = taskState.attempt;
+    const key = attempt ? `${attempt.stage}:${attempt.startedAt}` : undefined;
+
+    if (
+      key &&
+      key !== lastAttempt.current &&
+      !CONFIG.API_URL &&
+      gameService.getSnapshot().matches("playing")
+    ) {
+      gameService.send("tasks.refillDeliveries");
+    }
+
+    lastAttempt.current = key;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taskState.attempt, gameService]);
 
   // The HUD button can also connect/disconnect the wallet.
   useEffect(() => {
