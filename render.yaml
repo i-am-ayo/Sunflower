@@ -21,3 +21,5 @@ services:
         value: local-dev
       - key: VITE_SEQUENCE_ACCESS_KEY
         value: local-dev
+      - key: VITE_FARM_REWARDS_ADDRESS
+        value: 0xc408f250FBECE4EeDa1E406059174A4c0354bE16

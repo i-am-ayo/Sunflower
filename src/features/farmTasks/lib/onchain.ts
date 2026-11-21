@@ -27,6 +27,12 @@ export const REWARDS_EXPLORER = "https://sepolia.etherscan.io";
 
 const RPC_URL = "https://ethereum-sepolia-rpc.publicnode.com";
 
+/**
+ * Farm Tasks days are ISO date strings ("2026-11-21"); the contract stores
+ * them as uint64 (20261121).
+ */
+const toChainDay = (day: string): bigint => BigInt(day.replace(/-/g, ""));
+
 const REWARDS_ABI = parseAbi([
   "function balanceOf(address) view returns (uint256)",
   "function decimals() view returns (uint8)",
@@ -51,7 +57,7 @@ const getWalletClient = () => {
 
 export const readOnchainRewards = async (
   address: Address,
-  day: number,
+  day: string,
 ): Promise<OnchainRewardState> => {
   if (!REWARDS_ADDRESS) throw new Error("Rewards contract not configured");
 
@@ -73,7 +79,7 @@ export const readOnchainRewards = async (
       address: REWARDS_ADDRESS,
       abi: REWARDS_ABI,
       functionName: "claimedMask",
-      args: [address, BigInt(day)],
+      args: [address, toChainDay(day)],
     }),
   ]);
 
@@ -86,7 +92,7 @@ export const readOnchainRewards = async (
 /** Pays the given stage mask (bit 0 = stage 1) to the player on Sepolia. */
 export const claimOnchainRewards = async (
   address: Address,
-  day: number,
+  day: string,
   mask: number,
 ): Promise<`0x${string}`> => {
   if (!REWARDS_ADDRESS) throw new Error("Rewards contract not configured");
@@ -104,7 +110,7 @@ export const claimOnchainRewards = async (
     address: REWARDS_ADDRESS,
     abi: REWARDS_ABI,
     functionName: "claimRewards",
-    args: [BigInt(day), mask],
+    args: [toChainDay(day), mask],
     account: address,
     chain: sepolia,
   });
