@@ -46,9 +46,11 @@ import {
   type OnchainRewardState,
 } from "../lib/onchain";
 import {
+  bumpClaimRun,
   connectMetaMask,
   creditWalletReward,
   disconnectWallet,
+  loadClaimRun,
   loadWalletAddress,
   loadWalletRewards,
   saveWalletAddress,
@@ -124,6 +126,9 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide, onOpen }) => {
     autoEndAt: taskState.attempt?.endsAt,
   });
   const taskDay = getTaskDay(now);
+  // The restart bumps this counter, giving the next run a fresh on-chain day
+  // key so the MTOM claim is available again.
+  const claimRun = loadClaimRun();
 
   const update = (next: FarmTaskState) => {
     setTaskState(next);
@@ -300,7 +305,7 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide, onOpen }) => {
     }
 
     let cancelled = false;
-    readOnchainRewards(walletAddress as `0x${string}`, taskDay)
+    readOnchainRewards(walletAddress as `0x${string}`, taskDay, claimRun)
       .then((state) => {
         if (!cancelled) setOnchain(state);
       })
@@ -311,10 +316,10 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide, onOpen }) => {
     return () => {
       cancelled = true;
     };
-  }, [walletAddress, taskDay]);
+  }, [walletAddress, taskDay, claimRun]);
 
-  const handlePayOnchain = async () => {
-    if (!walletAddress || !payoutMask) return;
+  const handlePayOnchain = async (): Promise<boolean> => {
+    if (!walletAddress || !payoutMask) return false;
 
     const payingMask = payoutMask;
 
@@ -324,6 +329,7 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide, onOpen }) => {
       await claimOnchainRewards(
         walletAddress as `0x${string}`,
         taskDay,
+        claimRun,
         payingMask,
       );
       // Record the transfer immediately: the RPC read below can briefly return
@@ -334,8 +340,13 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide, onOpen }) => {
         claimedMask: (prev?.claimedMask ?? 0) | payingMask,
       }));
       setOnchain(
-        await readOnchainRewards(walletAddress as `0x${string}`, taskDay),
+        await readOnchainRewards(
+          walletAddress as `0x${string}`,
+          taskDay,
+          claimRun,
+        ),
       );
+      return true;
     } catch (error) {
       if (isAlreadyClaimedError(error)) {
         setOnchain((prev) => ({
@@ -343,12 +354,36 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide, onOpen }) => {
           claimedMask: (prev?.claimedMask ?? 0) | payingMask,
         }));
         setOnchainError(t("farmTasks.onchain.already"));
-      } else {
-        setOnchainError(t("farmTasks.onchain.error"));
+        return true;
       }
+
+      setOnchainError(t("farmTasks.onchain.error"));
+      return false;
     } finally {
       setOnchainBusy(false);
     }
+  };
+
+  const handleRestart = async () => {
+    // Settle the current run before wiping it: restarting used to discard the
+    // pending MTOM payout without ever asking MetaMask for a transaction.
+    if (walletAddress && REWARDS_ADDRESS && payoutMask > 0) {
+      const paid = await handlePayOnchain();
+      if (!paid) return;
+    }
+
+    // Start the next run from stage one but keep the wallet identity, ledger
+    // and run counter: the run counter gives the new run its own on-chain day,
+    // so the claim button works again instead of being blocked by claimedMask.
+    Object.keys(localStorage)
+      .filter(
+        (key) =>
+          key.startsWith("farmTasks:") &&
+          !key.startsWith("farmTasks:wallet:"),
+      )
+      .forEach((key) => localStorage.removeItem(key));
+    bumpClaimRun();
+    window.location.reload();
   };
 
   return (
@@ -490,16 +525,7 @@ export const FarmTasksPanel: React.FC<Props> = ({ show, onHide, onOpen }) => {
                 <p className="text-xs text-center mb-2">
                   {t("farmTasks.allDone")}
                 </p>
-                <Button
-                  onClick={() => {
-                    // Start the next presentation from day one: drop every
-                    // Farm Tasks key (progress, claims, wallet ledger, name).
-                    Object.keys(localStorage)
-                      .filter((key) => key.startsWith("farmTasks:"))
-                      .forEach((key) => localStorage.removeItem(key));
-                    window.location.reload();
-                  }}
-                >
+                <Button onClick={handleRestart} disabled={onchainBusy}>
                   {t("farmTasks.restart")}
                 </Button>
               </div>

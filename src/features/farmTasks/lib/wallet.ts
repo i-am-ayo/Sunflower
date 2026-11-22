@@ -10,6 +10,7 @@ import { readLocalStorageJSON, writeLocalStorageJSON } from "lib/localStorage";
 
 const ADDRESS_KEY = "farmTasks:wallet:address:v1";
 const REWARDS_KEY = "farmTasks:wallet:rewards:v1";
+const CLAIM_RUN_KEY = "farmTasks:wallet:claimRun:v1";
 
 /** Fired on `window` whenever the connected address changes. */
 export const WALLET_CHANGE_EVENT = "farmTasks:wallet-changed";
@@ -116,6 +117,25 @@ export const creditWalletReward = (
     },
   };
   writeLocalStorageJSON(REWARDS_KEY, next);
+  return next;
+};
+
+/**
+ * The current Farm Tasks run. The stage-5 restart bumps it so the on-chain
+ * claim key moves on and the player can claim MTOM again in the next run.
+ * Lives under the preserved `farmTasks:wallet:` prefix, so it survives the
+ * restart (which only clears progress, claims and the farm snapshot).
+ */
+export const loadClaimRun = (): number => {
+  const run = readLocalStorageJSON<number>(CLAIM_RUN_KEY);
+  return typeof run === "number" && Number.isFinite(run) && run > 0
+    ? Math.floor(run)
+    : 1;
+};
+
+export const bumpClaimRun = (): number => {
+  const next = loadClaimRun() + 1;
+  writeLocalStorageJSON(CLAIM_RUN_KEY, next);
   return next;
 };
 

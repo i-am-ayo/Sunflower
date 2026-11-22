@@ -29,9 +29,11 @@ const RPC_URL = "https://ethereum-sepolia-rpc.publicnode.com";
 
 /**
  * Farm Tasks days are ISO date strings ("2026-11-21"); the contract stores
- * them as uint64 (20261121).
+ * them as uint64 (20261121). The run number is appended so every stage-5
+ * restart starts a fresh claimedMask and the claim button works again.
  */
-const toChainDay = (day: string): bigint => BigInt(day.replace(/-/g, ""));
+const toChainDay = (day: string, run: number): bigint =>
+  BigInt(day.replace(/[^0-9]/g, "")) * 1000n + BigInt(run);
 
 const REWARDS_ABI = parseAbi([
   "function balanceOf(address) view returns (uint256)",
@@ -78,6 +80,7 @@ export const isAlreadyClaimedError = (error: unknown): boolean => {
 export const readOnchainRewards = async (
   address: Address,
   day: string,
+  run: number,
 ): Promise<OnchainRewardState> => {
   if (!REWARDS_ADDRESS) throw new Error("Rewards contract not configured");
 
@@ -99,7 +102,7 @@ export const readOnchainRewards = async (
       address: REWARDS_ADDRESS,
       abi: REWARDS_ABI,
       functionName: "claimedMask",
-      args: [address, toChainDay(day)],
+      args: [address, toChainDay(day, run)],
     }),
   ]);
 
@@ -113,6 +116,7 @@ export const readOnchainRewards = async (
 export const claimOnchainRewards = async (
   address: Address,
   day: string,
+  run: number,
   mask: number,
 ): Promise<`0x${string}`> => {
   if (!REWARDS_ADDRESS) throw new Error("Rewards contract not configured");
@@ -130,7 +134,7 @@ export const claimOnchainRewards = async (
     address: REWARDS_ADDRESS,
     abi: REWARDS_ABI,
     functionName: "claimRewards",
-    args: [toChainDay(day), mask],
+    args: [toChainDay(day, run), mask],
     account: address,
     chain: sepolia,
   });
